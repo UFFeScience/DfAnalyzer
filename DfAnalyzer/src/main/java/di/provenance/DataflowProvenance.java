@@ -647,14 +647,16 @@ public class DataflowProvenance {
         return sb;
     }
 
-    protected static Integer getTransformationID(Connection db, String dtTag, Integer identifier) {
+    protected static Integer getTransformationID(Connection db, String dfTag, String dtTag, Integer identifier) {
         try {
             Statement st = db.createStatement();
             StringBuilder sb = new StringBuilder();
             sb.append("SELECT t.id ").append(Utils.NEW_LINE)
-                    .append("FROM task t, data_transformation dt ").append(Utils.NEW_LINE)
-                    .append("WHERE t.dt_id = dt.id AND dt.tag = '").append(dtTag).append("' AND ")
-                    .append("t.identifier = ").append(identifier);
+                    .append("FROM task t, data_transformation dt, dataflow df, dataflow_version dfv ").append(Utils.NEW_LINE)
+                    .append("WHERE t.dt_id = dt.id AND t.df_version = dfv.version AND dfv.df_id = df.id ").append(Utils.NEW_LINE)
+                    .append("AND df.tag = '").append(dfTag).append("' AND dt.tag = '").append(dtTag).append("' AND ")
+                    .append("t.identifier = ").append(identifier).append(Utils.NEW_LINE)
+                    .append("ORDER BY dfv.version DESC LIMIT 1");
 
             ResultSet rs = st.executeQuery(sb.toString());
             if (rs.next()) {
