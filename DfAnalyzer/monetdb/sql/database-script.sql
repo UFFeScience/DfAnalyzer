@@ -262,9 +262,13 @@ BEGIN
 	DECLARE vdf_version INTEGER;
 	DECLARE vdt_id INTEGER;
 
-	SELECT dfv.version, dt.id INTO vdf_version, vdt_id
-	FROM dataflow df, data_transformation dt, dataflow_version as dfv
-	WHERE df.id = dt.df_id AND dfv.df_id = df.id AND df.tag = vdf_tag AND dt.tag = vdt_tag;
+	SELECT dt.id INTO vdt_id
+	FROM dataflow df, data_transformation dt
+	WHERE df.id = dt.df_id AND df.tag = vdf_tag AND dt.tag = vdt_tag;
+
+	SELECT MAX(dfv.version) INTO vdf_version
+	FROM dataflow df, dataflow_version dfv
+	WHERE dfv.df_id = df.id AND df.tag = vdf_tag;
 
 	IF((vdf_version IS NOT NULL) AND (vdt_id IS NOT NULL)) THEN
 		SELECT t.id, t.status INTO vid, vvstatus

@@ -90,7 +90,7 @@ public class TaskProvenance {
                             if (Utils.isNumericArray(record[index])) {
                                 HashMap<String, Integer> hmap = new HashMap<>();
                                 hmap.put(t.dependencyTags.get(index).toLowerCase(),
-                                        DataflowProvenance.getTransformationID(db, t.dependencyTags.get(index).toLowerCase(), Integer.parseInt(record[index])));
+                                        DataflowProvenance.getTransformationID(db, t.dataflowTag, t.dependencyTags.get(index).toLowerCase(), Integer.parseInt(record[index])));
                                 t.dependencyTaskIDs.add(hmap);
                             }
                         }
