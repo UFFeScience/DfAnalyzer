@@ -18,6 +18,10 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.Optional;
@@ -70,28 +74,163 @@ public class DbConnection {
                 .toString();
     }
 
+    /** Carrega o dataflow por tag e versão, sem QuerySpecification. */
+    public Dataflow loadDataflow(String dataflowTag, int version) {
+        return loadDataflow(new QuerySpecification(dataflowTag, version, ""));
+    }
+
+    public String getDataflowTag(int dataflowId) {
+        try (PreparedStatement st = connection.prepareStatement(
+                "SELECT tag FROM dataflow WHERE id = ?;")) {
+            st.setInt(1, dataflowId);
+            try (ResultSet rs = st.executeQuery()) {
+                return rs.next() ? rs.getString(1) : null;
+            }
+        } catch (SQLException ex) {
+            ex.printStackTrace();
+            return null;
+        }
+    }
+
+    /** Maior versão registrada do dataflow, ou null. */
+    public Integer getLatestVersion(int dataflowId) {
+        try (PreparedStatement st = connection.prepareStatement(
+                "SELECT MAX(version) FROM dataflow_version WHERE df_id = ?;")) {
+            st.setInt(1, dataflowId);
+            try (ResultSet rs = st.executeQuery()) {
+                if (rs.next()) {
+                    int version = rs.getInt(1);
+                    return rs.wasNull() ? null : version;
+                }
+                return null;
+            }
+        } catch (SQLException ex) {
+            ex.printStackTrace();
+            return null;
+        }
+    }
+
     public Dataflow loadDataflow(QuerySpecification querySpec) {
         Dataflow dataflow = getDataflow(querySpec.getDataflowTag(), querySpec.getDataflowVersion());
+        if (dataflow == null) {
+            // Null permite ao chamador responder 400.
+            return null;
+        }
         dataflow.addTransformations(getTransformations(dataflow.getId(), dataflow.getVersion()));
         dataflow.addDatasets(getDatasets(dataflow.getId(), dataflow.getVersion()));
         // dataflow.addPrograms(getPrograms(dataflow.getId(), dataflow.getVersion()));
 
-        for (Dataset ds : dataflow.getDatasets()) {
-            ds.addExtractors(getExtractors(ds.getId()));
-            ds.addExtractorCombinations(getExtractorCombinations(ds));
-            ds.addAttributes(getAttributes(ds));
-            updateDependencies(dataflow, ds);
-        }
+        loadExtractors(dataflow);
+        loadAttributes(dataflow);
+        loadDependencies(dataflow);
         return dataflow;
+    }
+
+    private static Map<Integer, Dataset> datasetsById(Dataflow dataflow) {
+        Map<Integer, Dataset> byId = new LinkedHashMap<>();
+        for (Dataset dataset : dataflow.getDatasets()) {
+            byId.put(dataset.getId(), dataset);
+        }
+        return byId;
+    }
+
+    private void loadExtractors(Dataflow dataflow) {
+        Map<Integer, Dataset> byId = datasetsById(dataflow);
+        try (PreparedStatement st = connection.prepareStatement(
+                "SELECT e.ds_id, e.id, e.tag, e.cartridge, e.extension"
+                + " FROM extractor e, data_set ds, dataflow df"
+                + " WHERE e.ds_id = ds.id AND ds.df_id = df.id AND df.id = ?"
+                + " ORDER BY e.ds_id, e.id;")) {
+            st.setInt(1, dataflow.getId());
+            try (ResultSet rs = st.executeQuery()) {
+                while (rs.next()) {
+                    Dataset dataset = byId.get(rs.getInt(1));
+                    if (dataset == null) {
+                        continue;
+                    }
+                    Extractor extractor = new Extractor();
+                    extractor.setID(rs.getInt(2));
+                    extractor.setTag(rs.getString(3));
+                    extractor.setMethod(ExtractionMethod.valueOf(rs.getString(4)));
+                    extractor.setCartridge(ExtractionCartridge.valueOf(rs.getString(5)));
+                    dataset.addExtractors(new ArrayList<>(Arrays.asList(extractor)));
+                }
+            }
+        } catch (Exception ex) {
+            ex.printStackTrace();
+        }
+    }
+
+    private void loadAttributes(Dataflow dataflow) {
+        Map<Integer, Dataset> byId = datasetsById(dataflow);
+        Map<Integer, List<Attribute>> collected = new LinkedHashMap<>();
+
+        try (PreparedStatement st = connection.prepareStatement(
+                "SELECT a.ds_id, a.id, a.extractor_id, a.name, a.type"
+                + " FROM attribute a, data_set ds, dataflow df"
+                + " WHERE a.ds_id = ds.id AND ds.df_id = df.id AND df.id = ?"
+                + " ORDER BY a.ds_id, a.id;")) {
+            st.setInt(1, dataflow.getId());
+            try (ResultSet rs = st.executeQuery()) {
+                while (rs.next()) {
+                    int datasetId = rs.getInt(1);
+                    Dataset dataset = byId.get(datasetId);
+                    if (dataset == null) {
+                        continue;
+                    }
+                    Attribute attribute = new Attribute();
+                    attribute.setId(rs.getInt(2));
+                    attribute.setExtractor(dataset.getExtractor(rs.getInt(3)));
+                    attribute.setName(rs.getString(4));
+                    attribute.setAttributeType(rs.getString(5));
+
+                    List<Attribute> list = collected.get(datasetId);
+                    if (list == null) {
+                        list = new ArrayList<>();
+                        collected.put(datasetId, list);
+                    }
+                    list.add(attribute);
+                }
+            }
+        } catch (Exception ex) {
+            ex.printStackTrace();
+        }
+
+        for (Map.Entry<Integer, List<Attribute>> entry : collected.entrySet()) {
+            byId.get(entry.getKey()).addAttributes(new ArrayList<>(entry.getValue()));
+        }
+    }
+
+    private void loadDependencies(Dataflow dataflow) {
+        Map<Integer, Dataset> byId = datasetsById(dataflow);
+        try (PreparedStatement st = connection.prepareStatement(
+                "SELECT dep.ds_id, dep.previous_dt_id, dep.next_dt_id"
+                + " FROM data_dependency dep, data_set ds, dataflow df"
+                + " WHERE dep.ds_id = ds.id AND ds.df_id = df.id AND df.id = ?"
+                + " ORDER BY dep.id;")) {
+            st.setInt(1, dataflow.getId());
+            try (ResultSet rs = st.executeQuery()) {
+                while (rs.next()) {
+                    Dataset dataset = byId.get(rs.getInt(1));
+                    if (dataset == null) {
+                        continue;
+                    }
+                    Transformation previous = dataflow.getTransformation(rs.getInt(2)).orElse(null);
+                    Transformation next = dataflow.getTransformation(rs.getInt(3)).orElse(null);
+                    dataflow.addDependency(new Dependency(previous, dataset, next));
+                }
+            }
+        } catch (Exception ex) {
+            ex.printStackTrace();
+        }
     }
 
     public Dataflow getDataflow(String dfTag, int dfVersion) {
         Dataflow dataflow = null;
-        try {
-            PreparedStatement st = connection.prepareStatement("SELECT df.id, df.tag, dfv.version "
+        try (PreparedStatement st = connection.prepareStatement("SELECT df.id, df.tag, dfv.version "
                     + "FROM dataflow df, dataflow_version dfv "
                     + "WHERE tag=? AND df.id = dfv.df_id AND dfv.version=?;",
-                    Statement.RETURN_GENERATED_KEYS);
+                    Statement.RETURN_GENERATED_KEYS)) {
             st.setString(1, dfTag);
             st.setInt(2, dfVersion);
             ResultSet rs = st.executeQuery();
@@ -108,12 +247,11 @@ public class DbConnection {
 
     public ArrayList<Transformation> getTransformations(Integer id, Integer version) {
         ArrayList<Transformation> dts = new ArrayList<>();
-        try {
-            PreparedStatement st = connection.prepareStatement("SELECT dt.id, dt.tag "
+        try (PreparedStatement st = connection.prepareStatement("SELECT dt.id, dt.tag "
                     + "FROM data_transformation dt, dataflow df, dataflow_version dfv "
                     + "WHERE df.id = dfv.df_id AND df.id=? "
                     + "AND dfv.version=? AND df.id = dt.df_id;",
-                    Statement.RETURN_GENERATED_KEYS);
+                    Statement.RETURN_GENERATED_KEYS)) {
             st.setInt(1, id);
             st.setInt(2, version);
             ResultSet rs = st.executeQuery();
@@ -133,12 +271,11 @@ public class DbConnection {
 
     public ArrayList<Dataset> getDatasets(Integer id, Integer version) {
         ArrayList<Dataset> dss = new ArrayList<>();
-        try {
-            PreparedStatement st = connection.prepareStatement("SELECT ds.id, ds.tag "
+        try (PreparedStatement st = connection.prepareStatement("SELECT ds.id, ds.tag "
                     + "FROM data_set ds, dataflow df, dataflow_version dfv "
                     + "WHERE df.id = dfv.df_id AND df.id=? "
                     + "AND dfv.version=? AND df.id = ds.df_id;",
-                    Statement.RETURN_GENERATED_KEYS);
+                    Statement.RETURN_GENERATED_KEYS)) {
             st.setInt(1, id);
             st.setInt(2, version);
             ResultSet rs = st.executeQuery();

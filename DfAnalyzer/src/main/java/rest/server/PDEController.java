@@ -7,11 +7,14 @@ import di.object.process.DaemonDI;
 import di.object.process.Transaction;
 import org.json.simple.JSONObject;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import process.background.ProvenanceQueue;
+import rest.config.DataSetTableDao;
 import rest.config.PDEHandler;
 
 /**
@@ -28,8 +31,23 @@ public class PDEController {
     @Autowired
     private DaemonDI daemonDI;
 
+    @Autowired
+    private DataSetTableDao dataSetTables;
+
+    /** Resposta 409 com o motivo, ou null se o dataflow pode ser enfileirado. */
+    private ResponseEntity<String> refusal(Transaction dfTransaction) {
+        String conflict = dataSetTables.conflict(dfTransaction);
+        if (conflict == null) {
+            return null;
+        }
+        JSONObject body = new JSONObject();
+        body.put("error", "DATASET_TABLE_CONFLICT");
+        body.put("message", conflict);
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(body.toJSONString());
+    }
+
     @PostMapping(value = "/dataflow")
-    public String dataflow(@RequestBody String message) {
+    public ResponseEntity<String> dataflow(@RequestBody String message) {
         daemonDI.transactionsGenerated++;
         
         long parsingStart;
@@ -52,6 +70,11 @@ public class PDEController {
         dfTransaction.generationStart = generationStart;
         dfTransaction.generationEnd = generationEnd;
 
+        ResponseEntity<String> refusal = refusal(dfTransaction);
+        if (refusal != null) {
+            return refusal;
+        }
+
         queueingStart = System.currentTimeMillis();
         daemonDI.queue.handleTransaction(ProvenanceQueue.DBOperation.PENDENT_TRANSACTION, dfTransaction);
         queueingEnd = System.currentTimeMillis();
@@ -64,7 +87,7 @@ public class PDEController {
         daemonDI.generationTime = daemonDI.generationTime + (generationEnd - generationStart);
         daemonDI.queueingTime = daemonDI.queueingTime + (queueingEnd - queueingStart);
         
-        return dataflow.toJSONString();
+        return ResponseEntity.ok(dataflow.toJSONString());
     }
 
     @PostMapping(value = "/task")
@@ -107,7 +130,7 @@ public class PDEController {
     }
 
     @PostMapping(value = "/dataflow/json")
-    public String dataflow_ingest(@RequestBody String payload) {
+    public ResponseEntity<String> dataflow_ingest(@RequestBody String payload) {
         daemonDI.transactionsGenerated++;
         
         long parsingStart;
@@ -130,6 +153,11 @@ public class PDEController {
         dfTransaction.generationStart = generationStart;
         dfTransaction.generationEnd = generationEnd;
 
+        ResponseEntity<String> refusal = refusal(dfTransaction);
+        if (refusal != null) {
+            return refusal;
+        }
+
         queueingStart = System.currentTimeMillis();
         daemonDI.queue.handleTransaction(ProvenanceQueue.DBOperation.PENDENT_TRANSACTION, dfTransaction);
         queueingEnd = System.currentTimeMillis();
@@ -142,7 +170,7 @@ public class PDEController {
         daemonDI.generationTime = daemonDI.generationTime + (generationEnd - generationStart);
         daemonDI.queueingTime = daemonDI.queueingTime + (queueingEnd - queueingStart);
         
-        return dataflow_json.toJSONString();
+        return ResponseEntity.ok(dataflow_json.toJSONString());
     }
 
     @PostMapping(value = "/task/json")

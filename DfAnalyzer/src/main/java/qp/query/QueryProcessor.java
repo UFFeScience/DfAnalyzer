@@ -40,6 +40,10 @@ public class QueryProcessor {
      * @return the SQL query satisfying the specified conditions and filters
      */
     public MonetDbSqlQuery runSqlQuery(QuerySpecification spec) {
+        return runSqlQuery(spec, true);
+    }
+
+    public MonetDbSqlQuery runSqlQuery(QuerySpecification spec, boolean writeCsv) {
         SqlClause selectClause = new SqlClause(null, ", ");
         SqlClause whereClause = new SqlClause(null, " AND ");
 
@@ -75,7 +79,9 @@ public class QueryProcessor {
         fromClause.addElements(fromDatasets.stream().map(ds -> ds.getTag()).collect(toCollection(LinkedHashSet::new)));
 
         MonetDbSqlQuery query = new MonetDbSqlQuery(selectClause,fromClause,whereClause);
-        dbConnection.runMonetDBQuery(query);
+        if (writeCsv) {
+            dbConnection.runMonetDBQuery(query);
+        }
         
         return query;
     }

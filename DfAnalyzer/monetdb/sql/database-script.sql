@@ -10,9 +10,11 @@ CREATE SEQUENCE "dd_id_seq" as integer START WITH 1;
 CREATE SEQUENCE "extractor_id_seq" as integer START WITH 1;
 CREATE SEQUENCE "ecombination_id_seq" as integer START WITH 1;
 CREATE SEQUENCE "att_id_seq" as integer START WITH 1;
+CREATE SEQUENCE "dfe_id_seq" as integer START WITH 1;
 CREATE SEQUENCE "task_id_seq" as integer START WITH 1;
 CREATE SEQUENCE "file_id_seq" as integer START WITH 1;
 CREATE SEQUENCE "performance_id_seq" as integer START WITH 1;
+CREATE SEQUENCE "annotation_id_seq" as integer START WITH 1;
 
 -- tables
 CREATE TABLE dataflow(
@@ -21,11 +23,23 @@ CREATE TABLE dataflow(
 	PRIMARY KEY ("id")
 );
 
+-- Origin/generator: quem escreveu esta DEFINICAO. origin e 'manual', 'generated' ou 'curated'; NULL = o cliente nao informou.
 CREATE TABLE dataflow_version(
 	version INTEGER DEFAULT NEXT VALUE FOR "version_id_seq" NOT NULL,
 	df_id INTEGER NOT NULL,
+	origin VARCHAR(10),
+	generator VARCHAR(200),
 	PRIMARY KEY ("version"),
 	FOREIGN KEY ("df_id") REFERENCES dataflow("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- Eixo de execucao. dataflow_version versiona a DEFINICAO do pipeline; dataflow_execution identifica uma RODADA.
+CREATE TABLE dataflow_execution(
+	id INTEGER DEFAULT NEXT VALUE FOR "dfe_id_seq" NOT NULL,
+	df_version INTEGER NOT NULL,
+	tag VARCHAR(100) NOT NULL,
+	PRIMARY KEY ("id"),
+	FOREIGN KEY ("df_version") REFERENCES dataflow_version("version") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 CREATE TABLE data_transformation(
@@ -110,6 +124,8 @@ CREATE TABLE task(
 	id INTEGER DEFAULT NEXT VALUE FOR "task_id_seq" NOT NULL,
 	identifier INTEGER NOT NULL,
 	df_version INTEGER NOT NULL,
+	-- Anulavel de proposito: uma falha ao resolver a execucao nao pode derrubar a ingestao inteira (risco R5).
+	df_exec INTEGER,
 	dt_id INTEGER NOT NULL,
 	status VARCHAR(10),
 	workspace VARCHAR(500),
@@ -118,6 +134,7 @@ CREATE TABLE task(
 	error_msg TEXT,
 	PRIMARY KEY ("id"),
 	FOREIGN KEY ("df_version") REFERENCES dataflow_version("version") ON DELETE CASCADE ON UPDATE CASCADE,
+	FOREIGN KEY ("df_exec") REFERENCES dataflow_execution("id") ON DELETE CASCADE ON UPDATE CASCADE,
 	FOREIGN KEY ("dt_id") REFERENCES data_transformation("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
@@ -128,6 +145,18 @@ CREATE TABLE file(
 	path VARCHAR(500) NOT NULL,
 	PRIMARY KEY ("id"),
 	FOREIGN KEY ("task_id") REFERENCES task("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- Anotacoes do pesquisador: o caderno de laboratorio dentro da ferramenta.
+CREATE TABLE annotation(
+	id INTEGER DEFAULT NEXT VALUE FOR "annotation_id_seq" NOT NULL,
+	df_id INTEGER NOT NULL,
+	target VARCHAR(200) NOT NULL,
+	body TEXT NOT NULL,
+	author VARCHAR(100),
+	created_at VARCHAR(30) NOT NULL,
+	PRIMARY KEY ("id"),
+	FOREIGN KEY ("df_id") REFERENCES dataflow("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 CREATE TABLE performance(
@@ -212,8 +241,10 @@ BEGIN
 		SELECT ds_id INTO vdd_id FROM data_dependency
 		WHERE previous_dt_id = vdep_dt_id AND next_dt_id = vdt_id AND ds_id = vds_id;
 
+		-- CORRECAO: faltava `AND ds_id = vds_id`.
 		DECLARE vid INTEGER;
-		SELECT id INTO vid FROM data_dependency WHERE previous_dt_id = vdep_dt_id AND next_dt_id IS NULL;
+		SELECT id INTO vid FROM data_dependency
+		WHERE previous_dt_id = vdep_dt_id AND next_dt_id IS NULL AND ds_id = vds_id;
 
 		IF(vid IS NULL) THEN
 			IF(vdd_id IS NULL) THEN
@@ -252,33 +283,71 @@ BEGIN
 	RETURN vid;
 END;
 
--- DROP FUNCTION insertTask;
+-- DROP FUNCTION insertTask; DROP FUNCTION insertExecution; Abre (ou reencontra) uma execucao de uma versao do dataflow.
+CREATE FUNCTION insertExecution (vdf_version INTEGER, vtag VARCHAR(100))
+RETURNS INTEGER
+BEGIN
+	DECLARE vid INTEGER;
+
+	SELECT e.id INTO vid FROM dataflow_execution e
+	WHERE e.df_version = vdf_version AND e.tag = vtag;
+
+	IF(vid IS NULL) THEN
+		SELECT NEXT VALUE FOR "dfe_id_seq" INTO vid;
+		INSERT INTO dataflow_execution(id, df_version, tag) VALUES (vid, vdf_version, vtag);
+	END IF;
+
+	RETURN vid;
+END;
+
 CREATE FUNCTION insertTask (videntifier INTEGER, vdf_tag VARCHAR(50), vdt_tag VARCHAR(50), vstatus VARCHAR(10), vworkspace VARCHAR(500), 
-	vcomputing_resource VARCHAR(100), voutput_msg TEXT, verror_msg TEXT)
+	vcomputing_resource VARCHAR(100), voutput_msg TEXT, verror_msg TEXT, vdf_exec_tag VARCHAR(100))
 RETURNS INTEGER
 BEGIN
 	DECLARE vid INTEGER;
 	DECLARE vvstatus VARCHAR(10);
 	DECLARE vdf_version INTEGER;
 	DECLARE vdt_id INTEGER;
+	DECLARE vdf_exec INTEGER;
 
-	SELECT dfv.version, dt.id INTO vdf_version, vdt_id
-	FROM dataflow df, data_transformation dt, dataflow_version as dfv
-	WHERE df.id = dt.df_id AND dfv.df_id = df.id AND df.tag = vdf_tag AND dt.tag = vdt_tag;
+	-- Use MAX(version) to ensure we only get one (the newest) scalar value.
+	SELECT MAX(dfv.version) INTO vdf_version
+	FROM dataflow df, dataflow_version dfv
+	WHERE df.id = dfv.df_id AND df.tag = vdf_tag;
+
+	-- Use the version we just found to get the specific transformation ID.
+	SELECT dt.id INTO vdt_id
+	FROM dataflow df, data_transformation dt
+	WHERE df.id = dt.df_id AND df.tag = vdf_tag AND dt.tag = vdt_tag;
+
+	-- SELECT dfv.version, dt.id INTO vdf_version, vdt_id FROM dataflow df, data_transformation dt, dataflow_version as dfv WHERE df.id = dt.df_id AND dfv.df_id = df.id AND df.tag = vdf_tag AND dt.tag = vdt_tag.
 
 	IF((vdf_version IS NOT NULL) AND (vdt_id IS NOT NULL)) THEN
+		-- Resolve a execucao.
+		IF((vdf_exec_tag IS NOT NULL) AND (vdf_exec_tag <> '')) THEN
+			SET vdf_exec = insertExecution(vdf_version, vdf_exec_tag);
+		ELSE
+			SELECT MAX(e.id) INTO vdf_exec FROM dataflow_execution e WHERE e.df_version = vdf_version;
+			IF(vdf_exec IS NULL) THEN
+				SET vdf_exec = insertExecution(vdf_version, 'implicita');
+			END IF;
+		END IF;
+
+		-- A execucao entra na chave: sem ela, a task 1 da segunda rodada era encontrada como a task 1 da primeira e a sobrescrevia, deixando linhas de dados de duas rodadas penduradas na mesma task.
 		SELECT t.id, t.status INTO vid, vvstatus
 		FROM task t
-		WHERE t.df_version = vdf_version AND t.dt_id = vdt_id AND t.identifier = videntifier;
+		WHERE t.df_version = vdf_version AND t.dt_id = vdt_id AND t.identifier = videntifier
+		  AND t.df_exec = vdf_exec;
 
 		IF(vid IS NULL) THEN
 		    SELECT NEXT VALUE FOR "task_id_seq" into vid;
-		    INSERT INTO task(id,identifier,df_version,dt_id,status,workspace,computing_resource,output_msg,error_msg) 
-		    VALUES (vid,videntifier,vdf_version,vdt_id,vstatus,vworkspace,vcomputing_resource,voutput_msg,verror_msg);
+		    INSERT INTO task(id,identifier,df_version,df_exec,dt_id,status,workspace,computing_resource,output_msg,error_msg) 
+		    VALUES (vid,videntifier,vdf_version,vdf_exec,vdt_id,vstatus,vworkspace,vcomputing_resource,voutput_msg,verror_msg);
 	    ELSE
 	    	UPDATE task
 	    	SET status = vstatus, output_msg = voutput_msg, error_msg = verror_msg
-	    	WHERE identifier = videntifier AND df_version = vdf_version AND dt_id = vdt_id;
+	    	WHERE identifier = videntifier AND df_version = vdf_version AND dt_id = vdt_id
+	    	  AND df_exec = vdf_exec;
 		END IF;
     END IF;
 	RETURN vid;

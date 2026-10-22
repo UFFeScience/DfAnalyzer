@@ -5,6 +5,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import qp.dataflow.Dataflow;
 import qp.query.MonetDbSqlQuery;
+import qp.query.QueryGuard;
 import qp.query.QueryProcessor;
 import qp.query.QuerySpecification;
 
@@ -22,6 +23,7 @@ public class QPHandler {
         //load dataflow from provenance database
         QuerySpecification spec = new QuerySpecification(dataflowTag, dataflowID, message);
         Dataflow dataflow = db.loadDataflow(spec);
+        QueryGuard.enforce(spec, dataflow);
         //generate query
         QueryProcessor qp = new QueryProcessor(db, dataflow);
         Stopwatch stopwatch1 = Stopwatch.createStarted();    

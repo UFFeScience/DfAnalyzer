@@ -12,8 +12,10 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -71,8 +73,11 @@ public class TaskProvenance {
                 if (df != null && task.transformationTag != null) {
                     return storeTask(db, task, df, t.getDBMS());
                 } else {
-                    System.err.println(" ERROR: Task - " + task.dataflowTag + " - " + task.ID + " - " + task.subID + " - " + task.status);
-                    return -1;
+                    throw new IllegalStateException("task descartada: dataflow '"
+                            + task.dataflowTag + "' nao pode ser resolvido"
+                            + (task.transformationTag == null
+                                ? " e a transformacao nao foi informada" : "")
+                            + " (task " + task.ID + ", status " + task.status + ")");
                 }
             }
         }
@@ -82,34 +87,31 @@ public class TaskProvenance {
     private static Integer storeTask(Connection db, Task t, Dataflow df, DBMS dbms) {
         try {
             Statement st = db.createStatement();
-            if (!t.dependencyIDs.isEmpty()) {
-                for (int i = 0; i < t.dependencyIDs.size(); i++) {
-                    String[] record = t.dependencyIDs.get(i);
-                    if (record.length == t.dependencyTags.size()) {
-                        for (int index = 0; index < t.dependencyTags.size(); index++) {
-                            if (Utils.isNumericArray(record[index])) {
-                                HashMap<String, Integer> hmap = new HashMap<>();
-                                hmap.put(t.dependencyTags.get(index).toLowerCase(),
-                                        DataflowProvenance.getTransformationID(db, t.dependencyTags.get(index).toLowerCase(), Integer.parseInt(record[index])));
-                                t.dependencyTaskIDs.add(hmap);
-                            }
-                        }
-                    }
-                }
-            }
-
             ResultSet rs;
             if (dbms.equals(DBMS.MEMSQL)) {
+                // MemSQL não grava a execução da task.
                 rs = insertTask(db, t.ID, t.dataflowTag, t.transformationTag, t.status, t.workspace, t.resource, t.output, t.error);
             } else {
-                rs = st.executeQuery("SELECT insertTask(" + t.ID + ",'"
-                        + t.dataflowTag + "','" + t.transformationTag + "','"
-                        + t.status + "','" + t.workspace + "','" + t.resource + "','"
-                        + t.output + "','" + t.error + "');");
+                rs = st.executeQuery(
+                    "SELECT insertTask(" +
+                    "CAST(" + t.ID + " AS INTEGER)," +
+                    "CAST('" + sqlLiteral(t.dataflowTag) + "' AS VARCHAR(50))," +
+                    "CAST('" + sqlLiteral(t.transformationTag) + "' AS VARCHAR(50))," +
+                    "CAST('" + sqlLiteral(t.status) + "' AS VARCHAR(10))," +
+                    "CAST('" + sqlLiteral(t.workspace) + "' AS VARCHAR(500))," +
+                    "CAST('" + sqlLiteral(t.resource) + "' AS VARCHAR(100))," +
+                    "CAST('" + sqlLiteral(t.output) + "' AS CLOB)," +
+                    "CAST('" + sqlLiteral(t.error) + "' AS CLOB)," +
+                    "CAST('" + sqlLiteral(t.executionTag) + "' AS VARCHAR(100))" +
+                    ");"
+                );
+
             }
             if (rs.next()) {
                 t.ID = rs.getInt(1);
             }
+
+            resolveDependencyTasks(db, t);
 
             ArrayList<Set> taskSets = df.getSetsFromTransformation(t.transformationTag);
             for (Set s : taskSets) {
@@ -139,6 +141,54 @@ public class TaskProvenance {
         }
 
         return t.ID;
+    }
+
+    /** Procura a produtora no mesmo dataflow, versão e execução da consumidora. */
+    static final String DEPENDENCY_TASK_SQL =
+            "SELECT p.id FROM task p, data_transformation dt, task c "
+            + "WHERE c.id = ? AND p.dt_id = dt.id AND dt.tag = ? AND p.identifier = ? "
+            + "AND p.df_version = c.df_version "
+            + "AND (p.df_exec = c.df_exec OR (p.df_exec IS NULL AND c.df_exec IS NULL)) "
+            + "ORDER BY p.id DESC";
+
+    private static void resolveDependencyTasks(Connection db, Task t) throws SQLException {
+        for (String[] record : t.dependencyIDs) {
+            if (record.length != t.dependencyTags.size()) {
+                Utils.print(0, "[Warning] Task " + t.transformationTag + ": dependencia com "
+                        + record.length + " id(s) para " + t.dependencyTags.size()
+                        + " tag(s) - registro ignorado, nenhuma ligacao gravada por ele.");
+                continue;
+            }
+            for (int index = 0; index < t.dependencyTags.size(); index++) {
+                String identifier = record[index].trim();
+                if (!Utils.isNumericArray(identifier)) {
+                    continue;
+                }
+                String depTag = t.dependencyTags.get(index).toLowerCase();
+                Integer producer = findDependencyTask(db, t.ID, depTag, Integer.parseInt(identifier));
+                if (producer == null) {
+                    Utils.print(0, "[Warning] Task " + t.transformationTag + ": task produtora '"
+                            + depTag + "' com identificador " + identifier
+                            + " nao encontrada nesta execucao - ligacao nao gravada.");
+                    continue;
+                }
+                HashMap<String, Integer> hmap = new HashMap<>();
+                hmap.put(depTag, producer);
+                t.dependencyTaskIDs.add(hmap);
+            }
+        }
+    }
+
+    private static Integer findDependencyTask(Connection db, Integer consumerTaskId,
+            String depTag, Integer identifier) throws SQLException {
+        try (PreparedStatement st = db.prepareStatement(DEPENDENCY_TASK_SQL)) {
+            st.setInt(1, consumerTaskId);
+            st.setString(2, depTag);
+            st.setInt(3, identifier);
+            try (ResultSet rs = st.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : null;
+            }
+        }
     }
 
     private static void storeFiles(Connection db, Task t, DBMS dbms) {
@@ -182,10 +232,11 @@ public class TaskProvenance {
                 } else {
                     sb = new StringBuilder();
 
+                    // Texto vindo do cliente.
                     sb.append("SELECT insertPerformance(").append(t.ID).append(",").append(t.subID).append(",'")
-                            .append(p.method).append("','").append(p.description).append("','")
-                            .append(p.startTime).append("','").append(p.endTime).append("','")
-                            .append(p.invocation).append("');").append("\n");
+                            .append(sqlLiteral(p.method)).append("','").append(sqlLiteral(p.description)).append("','")
+                            .append(sqlLiteral(p.startTime)).append("','").append(sqlLiteral(p.endTime)).append("','")
+                            .append(sqlLiteral(String.valueOf(p.invocation))).append("');").append("\n");
 
                     rs = st.executeQuery(sb.toString());
                 }
@@ -218,95 +269,128 @@ public class TaskProvenance {
         }
     }
 
+    /** Linhas por executeBatch. */
+    private static final int INSERT_BATCH_SIZE = 500;
+
+    /** Grava os elementos de um set como linhas da tabela `ds_<tag>`. */
     private static void insertElementsWithoutDependency(Connection db, Task t, Set s, DBMS dbms) {
-        try {
-            //String sqlFooter = ");" + Utils.NEW_LINE + "COMMIT;";
-            String sqlFooter = ");";
-
-            StringBuilder query = new StringBuilder();
-            //query.append("START TRANSACTION;" + Utils.NEW_LINE);
-
-            StringBuilder sqlHeader = new StringBuilder();
-
-            if (dbms.equals(DBMS.MEMSQL)) {
-                sqlHeader.append("INSERT INTO ")
-                        .append(Utils.getDataSetTableName(s.tag.toLowerCase()))
-                        .append("(")
-                        .append(t.transformationTag.toLowerCase())
-                        .append("_task_id");
+        ArrayList<Attribute> tableColumns = new ArrayList<>();
+        ArrayList<String> columnNames = new ArrayList<>();
+        ArrayList<String> exts = new ArrayList<>();
+        for (Attribute a : s.getAttributes()) {
+            if (a.extractorTag == null) {
+                columnNames.add(a.name.toLowerCase());
+                tableColumns.add(a);
             } else {
-                sqlHeader.append("INSERT INTO \"")
-                        .append(Utils.getDataSetTableName(s.tag.toLowerCase()))
-                        .append("\"(")
-                        .append(t.transformationTag.toLowerCase())
-                        .append("_task_id");
-            }
-
-            ArrayList<Attribute> tableColumns = new ArrayList<>();
-            ArrayList<String> exts = new ArrayList<>();
-            for (Attribute a : s.getAttributes()) {
-                if (a.extractorTag == null) {
-                    sqlHeader.append(",").append(a.name.toLowerCase());
-                    tableColumns.add(a);
-                } else {
-                    String fileExtCol = Utils.getExtractorFileColumn(a.extractorTag);
-                    if (!exts.contains(fileExtCol)) {
-                        sqlHeader.append(",")
-                                .append(fileExtCol);
-                        Attribute extractorAtt = new Attribute();
-                        extractorAtt.name = Utils.getExtractorFileColumn(a.extractorTag);
-                        extractorAtt.extractorTag = a.extractorTag;
-                        extractorAtt.type = AttributeType.EXTRACTION_TYPE;
-                        tableColumns.add(extractorAtt);
-                        exts.add(fileExtCol);
-                    }
+                String fileExtCol = Utils.getExtractorFileColumn(a.extractorTag);
+                if (!exts.contains(fileExtCol)) {
+                    columnNames.add(fileExtCol);
+                    Attribute extractorAtt = new Attribute();
+                    extractorAtt.name = fileExtCol;
+                    extractorAtt.extractorTag = a.extractorTag;
+                    extractorAtt.type = AttributeType.EXTRACTION_TYPE;
+                    tableColumns.add(extractorAtt);
+                    exts.add(fileExtCol);
                 }
             }
-            sqlHeader.append(") VALUES (");
-            query.append(sqlHeader);
+        }
 
-            //            capacity in megabytes
-            int capacity = 10000;
-            StringBuilder currentQuery = new StringBuilder();
-            StringBuilder sqlValues = new StringBuilder();
-            boolean hasPreviousRecord = false;
+        String tableName = Utils.getDataSetTableName(s.tag.toLowerCase());
+        String sql = buildInsertSQL(tableName, t.transformationTag.toLowerCase() + "_task_id", columnNames, dbms);
 
-            ArrayList<String> elementTuples = getElementsInCSVFormat(db, t, s, tableColumns, dbms);
-            for (int elementIndex = 0; elementIndex < elementTuples.size(); elementIndex++) {
-                if (hasPreviousRecord) {
-                    sqlValues.append("),(\n");
-                } else {
-                    hasPreviousRecord = true;
+        ArrayList<Object[]> rows = getElementRows(db, t, s, tableColumns, dbms);
+        if (rows.isEmpty()) {
+            return;
+        }
+
+        try (PreparedStatement stmt = db.prepareStatement(sql)) {
+            int pending = 0;
+            for (Object[] row : rows) {
+                // Posição 1 é o <transformacao>_task_id; as demais seguem tableColumns.
+                stmt.setInt(1, (Integer) row[0]);
+                for (int i = 0; i < tableColumns.size(); i++) {
+                    bindValue(stmt, i + 2, tableColumns.get(i).type, row[i + 1]);
                 }
-                sqlValues.append(elementTuples.get(elementIndex));
-
-                if (sqlValues.length() > capacity) {
-                    if (!elementTuples.isEmpty()) {
-                        currentQuery = new StringBuilder();
-                        currentQuery.append(query).append(sqlValues).append(sqlFooter);
-//                        if (Utils.verbose) {
-//                            Utils.print(2,currentQuery.toString());
-//                        }
-                        PreparedStatement stmt = db.prepareStatement(currentQuery.toString());
-                        stmt.executeUpdate();
-                        sqlValues = new StringBuilder();
-                        hasPreviousRecord = false;
-                    }
+                stmt.addBatch();
+                if (++pending == INSERT_BATCH_SIZE) {
+                    stmt.executeBatch();
+                    pending = 0;
                 }
             }
-
-            if (sqlValues.length() > 0) {
-                currentQuery = new StringBuilder();
-                currentQuery.append(query).append(sqlValues).append(sqlFooter);
-//                if (Utils.verbose) {
-//                    Utils.print(2,currentQuery.toString());
-//                }
-                PreparedStatement stmt = db.prepareStatement(currentQuery.toString());
-                stmt.executeUpdate();
+            if (pending > 0) {
+                stmt.executeBatch();
             }
         } catch (SQLException ex) {
-            Logger.getLogger(Provenance.class.getName()).log(Level.SEVERE, null, ex);
-        } 
+            Logger.getLogger(Provenance.class.getName()).log(Level.SEVERE,
+                    "falha ao gravar elementos em " + tableName + " (task " + t.ID + ")", ex);
+        }
+    }
+
+    /** Só identificadores no texto do SQL; os valores vão como parâmetros. */
+    static String buildInsertSQL(String tableName, String taskColumn, List<String> columns, DBMS dbms) {
+        StringBuilder sql = new StringBuilder("INSERT INTO ");
+        if (dbms.equals(DBMS.MEMSQL)) {
+            sql.append(tableName);
+        } else {
+            sql.append('"').append(tableName).append('"');
+        }
+        sql.append('(').append(taskColumn);
+        for (String c : columns) {
+            sql.append(',').append(c);
+        }
+        sql.append(") VALUES (?");
+        for (int i = 0; i < columns.size(); i++) {
+            sql.append(",?");
+        }
+        return sql.append(')').toString();
+    }
+
+    /** Tamanho das colunas criadas em DataflowProvenance.getAttributeStatement. */
+    static final int TEXT_MAX_LENGTH = 500;
+    static final int FILE_MAX_LENGTH = 300;
+
+    /** Converte o texto do cliente para o tipo da coluna. */
+    static Object toJdbcValue(AttributeType type, String raw) {
+        if (raw != null && type == AttributeType.TEXT && raw.length() > TEXT_MAX_LENGTH) {
+            return null;
+        }
+        if (raw != null && type == AttributeType.FILE && raw.length() > FILE_MAX_LENGTH) {
+            return null;
+        }
+        if (type == AttributeType.NUMERIC) {
+            if (raw == null) {
+                return null;
+            }
+            try {
+                double d = Double.parseDouble(raw.trim());
+                return (Double.isNaN(d) || Double.isInfinite(d)) ? null : d;
+            } catch (NumberFormatException ex) {
+                return null;
+            }
+        }
+        return raw;
+    }
+
+    private static void bindValue(PreparedStatement stmt, int index, AttributeType type, Object value) throws SQLException {
+        if (value == null) {
+            stmt.setNull(index, sqlTypeFor(type));
+        } else if (value instanceof Double) {
+            stmt.setDouble(index, (Double) value);
+        } else if (value instanceof Integer) {
+            stmt.setInt(index, (Integer) value);
+        } else {
+            stmt.setString(index, value.toString());
+        }
+    }
+
+    private static int sqlTypeFor(AttributeType type) {
+        if (type == AttributeType.NUMERIC) {
+            return Types.DOUBLE;
+        }
+        if (type == AttributeType.EXTRACTION_TYPE) {
+            return Types.INTEGER;
+        }
+        return Types.VARCHAR;
     }
 
     private static void updateElementsWithDependency(Connection db, Task t, Set s, DBMS dbms) throws SQLException {
@@ -378,65 +462,61 @@ public class TaskProvenance {
         }
     }
 
-    public static ArrayList<String> getElementsInCSVFormat(Connection db, Task task,
-            Set set, ArrayList<Attribute> extractionAttributes, DBMS dbms) {
-        ArrayList<String> result = new ArrayList<>();
+    private static ArrayList<Object[]> getElementRows(Connection db, Task task,
+            Set set, ArrayList<Attribute> attributes, DBMS dbms) {
+        ArrayList<Object[]> result = new ArrayList<>();
         for (Element e : task.elements) {
             if (e.setTag.equals(set.tag)) {
-                result.addAll(getValuesInCSVFormat(db, set, e, extractionAttributes, task, dbms));
+                Object[] row = getElementRow(db, set, e, attributes, task, dbms);
+                if (row != null) {
+                    result.add(row);
+                }
             }
         }
         return result;
     }
 
-    public static ArrayList<String> getValuesInCSVFormat(Connection db, Set set, Element element,
+    /** Uma linha: [task.ID, valor1, valor2, ...] alinhada a `attributes`. */
+    private static Object[] getElementRow(Connection db, Set set, Element element,
             ArrayList<Attribute> attributes, Task task, DBMS dbms) {
-        ArrayList<String> result = new ArrayList<>();
+        if (element.values.size() != attributes.size()) {
+            Logger.getLogger(Provenance.class.getName()).log(Level.WARNING,
+                    "elemento do set {0} (task {1}) descartado: {2} valores para {3} atributos",
+                    new Object[]{set.tag, task.ID, element.values.size(), attributes.size()});
+            return null;
+        }
 
+        Object[] row = new Object[attributes.size() + 1];
+        row[0] = task.ID;
+        for (int i = 0; i < attributes.size(); i++) {
+            Attribute a = attributes.get(i);
+            String currentValue = element.values.get(i);
 
-        if (element.values.size() == attributes.size()) {
-            StringBuilder tuple = new StringBuilder();
-            tuple.append(task.ID);
-//                for (Integer value : task.dependencyIDs.values()) {
-//                    tuple.append(",").append(value);
-//                }
-
-            int index = 0;
-            for (int i = 0; i < attributes.size(); i++) {
-                Attribute a = attributes.get(i);
-//                    if ((set.type == SetType.OUTPUT && a.extractorTag != null)
-//                            || set.type == SetType.INPUT) {
-                String currentValue = element.values.get(i);
-                index++;
-
-                if (a.type == AttributeType.LONG_TEXT
-                        || a.type == AttributeType.TEXT
-                        || a.type == AttributeType.FILE) {
-                    tuple.append(",'").append(currentValue).append("'");
-                } else if (a.type == AttributeType.NUMERIC) {
-                    tuple.append(",").append(currentValue);
-                } else if (a.type == AttributeType.EXTRACTION_TYPE) {
-                    String filePath = null;
-                    int fileID = 0;
-                    if (!set.extractors.isEmpty()) {
-                        filePath = currentValue;
-                        fileID = Utils.getFileID(task.files, filePath);
-                        tuple.append(",").append(fileID);
-                    }
-
-                    if (!set.extractors.isEmpty()
-                            && !set.propagatedExtractors.containsKey(a.extractorTag)) {
-                        currentValue = currentValue.replaceAll("\r", "");
+            if (a.type == AttributeType.EXTRACTION_TYPE) {
+                Integer fileID = null;
+                if (!set.extractors.isEmpty()) {
+                    String filePath = currentValue;
+                    fileID = Utils.getFileID(task.files, filePath);
+                    if (!set.propagatedExtractors.containsKey(a.extractorTag)) {
                         storeDataIntoExtractorTable(db, set, a.extractorTag, filePath, fileID, dbms);
                     }
                 }
-//                    }
+                row[i + 1] = fileID;
+            } else {
+                Object value = toJdbcValue(a.type, currentValue);
+                if (value == null && currentValue != null) {
+                    String motivo = a.type == AttributeType.NUMERIC
+                            ? "valor NUMERIC nao numerico: \"" + currentValue + "\""
+                            : "valor " + a.type + " com " + currentValue.length()
+                                    + " caracteres, maior que a coluna";
+                    Logger.getLogger(Provenance.class.getName()).log(Level.WARNING,
+                            "{0}.{1} (task {2}): {3} - gravado como NULL",
+                            new Object[]{set.tag, a.name, task.ID, motivo});
+                }
+                row[i + 1] = value;
             }
-
-            result.add(tuple.toString());
         }
-
-        return result;
+        return row;
     }
 
     private static void storeDataIntoExtractorTable(Connection db, Set set,
@@ -534,6 +614,11 @@ public class TaskProvenance {
         } catch (SQLException | IOException ex) {
             Logger.getLogger(Provenance.class.getName()).log(Level.SEVERE, null, ex);
         }
+    }
+
+    /** Dobra aspas simples para uso como literal SQL. */
+    private static String sqlLiteral(String value) {
+        return value == null ? "" : value.replace("'", "''");
     }
 
     private static ResultSet insertTask(Connection db, Integer videntifier, String vdf_tag, String vdt_tag, String vstatus, String vworkspace, String vcomputing_resource, String voutput_msg, String verror_msg) throws SQLException {

@@ -158,11 +158,30 @@ public class JSONReader {
         return null;
     }
 
+    static String normalizeOrigin(Object raw) {
+        if (!(raw instanceof String)) {
+            return null;
+        }
+        String origin = ((String) raw).trim().toLowerCase();
+        if (origin.equals("manual") || origin.equals("generated") || origin.equals("curated")) {
+            return origin;
+        }
+        if (!origin.isEmpty()) {
+            Logger.getLogger(JSONReader.class.getName()).log(Level.WARNING,
+                    "origin desconhecida no dataflow: ''{0}'' - gravada como nao informada", raw);
+        }
+        return null;
+    }
+
     public static Transaction generationDataflowTransaction(String fileName, String path, JSONObject dfJSON, DBMS dbms) {
         Transaction t = new Transaction(TransactionType.DATAFLOW, fileName, path, dbms);
 
         Dataflow df = new Dataflow();
         df.dataflowTag = ((String) dfJSON.get("tag")).toLowerCase();
+        df.origin = normalizeOrigin(dfJSON.get("origin"));
+        Object generator = dfJSON.get("generator");
+        df.generator = generator instanceof String && !((String) generator).trim().isEmpty()
+                ? (String) generator : null;
         t.addObject(df);
 
         JSONArray dts = (JSONArray) dfJSON.get("transformations");
@@ -412,6 +431,9 @@ public class JSONReader {
         task.output = (String) jsonFile.get("output");
         task.error = (String) jsonFile.get("error");
         task.status = ((String) jsonFile.get("status")).toUpperCase();
+        // Ausente em clientes antigos.
+        Object execution = jsonFile.get("execution");
+        task.executionTag = execution == null ? "" : (String) execution;
 
         JSONArray performances = (JSONArray) jsonFile.get("performances");
         if (performances != null) {

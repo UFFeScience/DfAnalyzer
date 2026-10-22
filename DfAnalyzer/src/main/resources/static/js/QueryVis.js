@@ -204,8 +204,15 @@ var dataset = new Vue({
                     console.log("worked");
                 }
             },
-            error:function(){
-                console.log('not worked here.');
+            error:function(xhr){
+                // 400 carries the validation message produced by QueryGuard (U1/U8):
+                // show it instead of failing silently in the console.
+                var detail = (xhr && xhr.responseText) ? xhr.responseText
+                        : 'Nao foi possivel executar a consulta.';
+                console.log('query rejected: ' + detail);
+                $('#app').html('<div class="alert alert-danger" role="alert">'
+                        + '<strong>Consulta rejeitada.</strong><br>'
+                        + $('<div>').text(detail).html() + '</div>');
             } 
         });   
       }

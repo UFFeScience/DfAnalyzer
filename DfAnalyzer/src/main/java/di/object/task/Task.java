@@ -18,6 +18,8 @@ public class Task extends DataflowObject {
     public String resource = "";
     public String workspace = "";
     public String status = "";
+    /** Vazia em clientes antigos; o insertTask usa então a execução mais recente da versão. */
+    public String executionTag = "";
     public String output = "";
     public String error = "";
     public ArrayList<dfFile> files = new ArrayList<>();

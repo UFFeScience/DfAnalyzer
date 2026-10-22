@@ -2,21 +2,24 @@ import requests
 import os
 from .ProvenanceObject import ProvenanceObject
 from .transformation import Transformation
+from .response import check_response
 
 dfa_url = os.environ.get('DFA_URL', "http://localhost:22000/")
 
 
 class Dataflow(ProvenanceObject):
-    """
-    This class defines a dataflow.
-    
-    Attributes:
-        - tag (str): Dataflow tag.
-        - transformations (list, optional): Dataflow transformations.
-    """
-    def __init__(self, tag, transformations=[]):
+    """This class defines a dataflow."""
+    ORIGINS = ("manual", "generated", "curated")
+
+    def __init__(self, tag, transformations=[], origin=None, generator=None):
         ProvenanceObject.__init__(self, tag)
         self.transformations = transformations
+        assert origin is None or origin in self.ORIGINS, \
+            "The origin must be one of {}.".format(self.ORIGINS)
+        if origin is not None:
+            self._origin = origin
+        if generator:
+            self._generator = str(generator)
 
     @property
     def transformations(self):
@@ -51,3 +54,4 @@ class Dataflow(ProvenanceObject):
         url = dfa_url + '/pde/dataflow/json'
         r = requests.post(url, json=self.get_specification())      
         print(r.status_code)
+        check_response(r, f"dataflow '{self._tag}'")

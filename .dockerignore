@@ -1,0 +1,14 @@
+# Artefatos de build — o estágio Maven os reconstrói do zero.
+DfAnalyzer/target/
+DfAnalyzer/studio/node_modules/
+DfAnalyzer/studio/dist/
+DfAnalyzer/studio/node/
+
+*.log
+
+.git/
+.gitignore
+**/.DS_Store
+**/__pycache__/
+**/*.py[cod]
+**/*.swp

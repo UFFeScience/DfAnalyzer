@@ -2,17 +2,20 @@
 
 ## Contents
 
-1. [Software requirements](#overview)
-2. [Installation](#installation)
-3. [An overview of DfAnalyzer components, lib and documentations](#an-overview-of-dfanalyzer-components-and-their-documentations)
+1. [Overview](#overview)
+2. [Quick start with Docker](#quick-start-with-docker) (Linux, macOS and Windows)
+3. [Software requirements](#software-requirements)
+4. [Installation](#installation)
+5. [An overview of DfAnalyzer components, lib and documentations](#an-overview-of-dfanalyzer-components-and-their-documentations)
 
-- Raw Data Extractor and Indexer
-- Dataflow Viewer (DfViewer)
+- Provenance Data Extractor (PDE)
+- DfA Studio and the legacy Dataflow Viewer (DfViewer)
 - Query Interface (QI)
-- Query Dashboard (QD)
+- API v2
+- Raw Data Extractor and Indexer
 
-4. [Docker image](#docker-image)
-5. [Computational Science and Engineering (CSE) applications](#computational-science-and-engineering-applications)
+6. [Docker images](#docker-images)
+7. [Computational Science and Engineering (CSE) applications](#computational-science-and-engineering-applications)
 
 - systems_of_equations_ex2
 - prototype_multi-physics
@@ -21,18 +24,75 @@
 
 This repository presents DfAnalyzer, a dataflow tool for monitoring, debugging, steering, and analyzing dataflow paths of scientific applications.
 
-**Important note**: The components *Provenance Data Extractor* (PDE), *Dataflow Viewer* (DfViewer), *Query Interface* (QI), and *Query Dashboard* (QP) are implemented as Web applications and RESTful services in DfAnalyzer project.
+**Important note**: The components *Provenance Data Extractor* (PDE), *DfA Studio*, *Dataflow Viewer* (DfViewer), and *Query Interface* (QI) are implemented as Web applications and RESTful services in DfAnalyzer project.
+
+## Quick start with Docker
+
+The fastest way to run DfAnalyzer is the `Dockerfile` at the root of this repository. It compiles the RESTful services and DfA Studio from source (running the test suite), installs MonetDB and *dfa-lib-python*, and starts everything with `docker compose`.
+
+| Port | Service |
+| --- | --- |
+| 22000 | RESTful services, DfA Studio (`/studio`) and legacy DfViewer (`/`) |
+| 50000 | MonetDB (`dataflow_analyzer` database, user and password `monetdb`) |
+
+### Linux
+
+1. Install [Docker Engine](https://docs.docker.com/engine/install/) and the Compose plugin, then allow your user to run Docker without `sudo` ([post-installation steps](https://docs.docker.com/engine/install/linux-postinstall/)).
+2. Build and start:
+
+   ```bash
+   git clone https://github.com/UFFeScience/DfAnalyzer.git
+   cd DfAnalyzer
+   docker compose up --build
+   ```
+
+3. Open <http://localhost:22000/studio>.
+
+### macOS
+
+1. Install [Docker Desktop for Mac](https://docs.docker.com/desktop/setup/install/mac-install/).
+2. Run the same commands as on Linux.
+
+The image targets `linux/amd64`, because MonetDB is installed from its amd64 packages. On Apple silicon (M1 and later), Docker Desktop runs it under emulation; keep *Use Rosetta for x86_64/amd64 emulation* enabled in Docker Desktop settings. The first build is slower than on an Intel machine.
+
+### Windows
+
+1. Install [Docker Desktop for Windows](https://docs.docker.com/desktop/setup/install/windows-install/) with the WSL 2 backend.
+2. Clone the repository **without** converting line endings, otherwise the shell scripts copied into the image fail with `$'\r': command not found`:
+
+   ```powershell
+   git clone -c core.autocrlf=false https://github.com/UFFeScience/DfAnalyzer.git
+   cd DfAnalyzer
+   docker compose up --build
+   ```
+
+   Cloning inside the WSL file system (for example, from an Ubuntu terminal) also avoids the problem and makes the build faster.
+3. Open <http://localhost:22000/studio>.
+
+### Using it
+
+Provenance is kept in the `monetdb_data` volume between restarts; `docker compose down -v` deletes it. The container also ships a small Python example that records a two-step dataflow:
+
+```bash
+docker compose exec dfanalyzer python3 /opt/example/soma.py
+```
+
+Applications running outside the container reach DfAnalyzer at `http://localhost:22000`. *dfa-lib-python* reads the server address from the environment variable `DFA_URL` (default `http://localhost:22000/`).
 
 ## Software requirements
 
-The following softwares have to be configured / installed for running this application.
+The following softwares have to be configured / installed for running this application without Docker.
 
-### RESTful services, Raw Data Extractor (RDE), and Raw Data Indexer (RDI)
+### RESTful services and DfA Studio
 
-1. [Java](https://www.oracle.com/java/index.html) as the main programming language. (Please read the [tutorials](http://www.oracle.com/technetwork/java/javase/downloads/index.html) provided by Oracle Technology)
-2. [Apache Maven](https://maven.apache.org/), the software project management and comprehension tool. 
-3. [MonetDB](https://www.monetdb.org) as the open-source column-store database system. (Please follow their [user guide](https://www.monetdb.org/Documentation/UserGuide))
-4. [FastBit](https://sdm.lbl.gov/fastbit/), an efficient compressed bitmap index technology.
+1. [Java](https://adoptium.net/) 8 to build (the `pom.xml` targets Java 8) and Java 8 or later to run.
+2. [Apache Maven](https://maven.apache.org/) 3.8 or later. Maven downloads the Node.js version used to build DfA Studio by itself, so Node.js does not need to be installed.
+3. [MonetDB](https://www.monetdb.org) as the open-source column-store database system. The Docker image uses MonetDB 11.49 (Dec2023). (Please follow their [user guide](https://www.monetdb.org/documentation/))
+
+### Raw Data Extractor (RDE) and Raw Data Indexer (RDI)
+
+1. [Java](https://www.oracle.com/java/index.html) and [Apache Maven](https://maven.apache.org/), as above.
+2. [FastBit](https://sdm.lbl.gov/fastbit/), an efficient compressed bitmap index technology.
 
 ### C++ library
 
@@ -48,14 +108,14 @@ The following softwares have to be configured / installed for running this appli
 
 ### RESTful services
 
-DfAnalyzer project can be easily built by running the following command lines:
+DfAnalyzer project can be built by running the following command lines:
 
 ```bash
 cd DfAnalyzer
 mvn clean package
 ```
 
-Then, the package file JAR is generated for DfAnalyzer project. It allows Java runtimes to efficiently deploy our tool. This JAR file is named as *DfAnalyzer-v2.jar* and it can be found in *./DfAnalyzer/target*.
+`mvn package` also builds DfA Studio into the JAR and runs the test suite; the build fails if a test fails. The JAR file is named *DfAnalyzer-1.0.jar* and it can be found in *./DfAnalyzer/target*.
 
 ### Raw Data Extractor and Indexer: RDE and RDI
 
@@ -88,11 +148,10 @@ Then, a static compiled library file, named as *libdfanalyzer.so*, is generated 
 
 ### Python library: *dfa-lib-python*
 
-The DfAnalyzer library for the programming language Python can be built with the following command lines:
+The DfAnalyzer library for the programming language Python can be installed with pip:
 
 ```bash
-cd library/dfa-lib-python
-make install
+pip install ./library/dfa-lib-python
 ```
 
 ## An overview of DfAnalyzer components and their documentations
@@ -101,61 +160,17 @@ make install
 
 #### Initialization
 
-The project DfAnalyzer at `dfanalyzer` contains all web applications and RESTful services provided by our tool. Therefore, the following components are present in this project: *Provenance Data Extractor* (PDE), *Dataflow Viewer* (DfViewer), *Query Interface* (QI), and *Query Dashboard* (QP).
+The project at `DfAnalyzer` contains all web applications and RESTful services provided by our tool. Therefore, the following components are present in this project: *Provenance Data Extractor* (PDE), *DfA Studio*, *Dataflow Viewer* (DfViewer), and *Query Interface* (QI).
 
-We provide a compressed file of our MonetDB database (to DfAnalyzer) for a local execution of the project DfAnalyzer. Therefore, users only need to run the script `start-dfanalyzer.sh` at the path `application/dfanalyzer`. We assume the execution of these steps in an Unix-based operating system, as follows:
+Outside Docker, with MonetDB installed, the script `restore-database.sh` creates the database `dataflow_analyzer` in `./data`, and `start-dfanalyzer.sh` starts MonetDB and the RESTful services. We assume the execution of these steps in an Unix-based operating system, as follows:
 
 ```bash
-cd application/dfanalyzer
+cd DfAnalyzer
+./restore-database.sh   # first run only
 ./start-dfanalyzer.sh
 ```
 
-Then, a similar output message should be displayed in the terminal tab:
-
-```
---------------------------------------------
-Restoring MonetDB database...
---------------------------------------------
-Starting database system...
-property            value
-hostname         localhost
-dbfarm           /dfanalyzer/applications/dfanalyzer/data
-status           monetdbd[3068] 1.7 (Jul2017-SP1) is serving this dbfarm
-mserver          /program/monetdb/bin/mserver5
-logfile          /dfanalyzer/applications/dfanalyzer/data/merovingian.log
-pidfile          /dfanalyzer/applications/dfanalyzer/data/merovingian.pid
-sockdir          /tmp
-listenaddr       localhost
-port             50000
-exittimeout      60
-forward          proxy
-discovery        true
-discoveryttl     600
-control          no
-passphrase       <unknown>
-mapisock         /tmp/.s.monetdb.50000
-controlsock      /tmp/.s.merovingian.50000
-starting database 'dataflow_analyzer'... done
-      name         state   health                       remarks
-dataflow_analyzer  R  0s  100% 11s  mapi:monetdb://localhost:50000/dataflow_analyzer
---------------------------------------------
-Starting DfA RESTful API
-
-  .   ____          _            __ _ _
- /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
-( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
- \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
-  '  |____| .__|_| |_|_| |_\__, | / / / /
- =========|_|==============|___/=/_/_/_/
- :: Spring Boot ::        (v1.5.8.RELEASE)
-
-2017-11-09 09:12:44.451  INFO 3073 --- [           main] rest.server.WebApplication               : Starting WebApplication v1.0 on mercedes with PID 3073 (/dfanalyzer/applications/dfa/DfA-1.0 started by vitor in /dfanalyzer/applications/dfanalyzer)
-...
-2017-11-09 09:12:55.397  INFO 3073 --- [           main] o.s.j.e.a.AnnotationMBeanExporter        : Registering beans for JMX exposure on startup
-2017-11-09 09:12:55.419  INFO 3073 --- [           main] o.s.c.support.DefaultLifecycleProcessor  : Starting beans in phase 0
-2017-11-09 09:12:55.815  INFO 3073 --- [           main] s.b.c.e.t.TomcatEmbeddedServletContainer : Tomcat started on port(s): 22000 (http)
-2017-11-09 09:12:55.833  INFO 3073 --- [           main] rest.server.WebApplication               : Started WebApplication in 12.433 seconds (JVM running for 13.257)
-```
+The services are ready when Spring Boot reports `Tomcat started on port(s): 22000 (http)`. On start, the schema is migrated to the current version, so a database created by an older release keeps its data.
 
 #### Provenance Data Extractor (PDE)
 
@@ -166,6 +181,15 @@ Since our RESTful application has been initialized, users can submit HTTP reques
 ![PDE RESTful services](./img/dfa-docs-pde.png)
 
 This web page (http://localhost:22000/dfview/help) can be accessed using a browser after the initialization of DfAnalyzer.
+
+PDE accepts two message formats:
+
+| Format | Dataflow specification | Task record | Used by |
+| --- | --- | --- | --- |
+| Text (methods above) | `POST /pde/dataflow` | `POST /pde/task` | *dfa-lib-cpp* |
+| JSON | `POST /pde/dataflow/json` | `POST /pde/task/json` | *dfa-lib-python* |
+
+Ingestion is asynchronous: PDE answers as soon as the message is queued, and the queue health is shown in DfA Studio. A new dataflow whose dataset tag is already used by another dataflow with different attributes is refused with HTTP 409 (`DATASET_TABLE_CONFLICT`), because dataset tables are named by the dataset tag only. *dfa-lib-python* turns this answer into a `ProvenanceRejectedWarning`.
 
 **Example**
 
@@ -209,23 +233,41 @@ dependency({create_equation_systems}, {1})
 
 More details about DfAnalyzer RESTful services can be found [here](https://hpcdb.github.io/armful/dfanalyzer.html).
 
-#### Dataflow Viewer (DfViewer)
+#### DfA Studio
 
-After the provenance and domain data capture, users can also analyze dataflow specifications stored in our provenance database using DfViewer. DfViewer is a feature provided by our Web application.
-
-As a first step, users have to use a Web browser (*e.g.*, Google Chrome) with the following URL for accessing DfViewer features:
+After the provenance and domain data capture, users can analyze the dataflows stored in our provenance database with DfA Studio, the web interface served at:
 
 ```bash
-http://localhost:22000 # users can also use the hostname for external connections
+http://localhost:22000/studio # users can also use the hostname for external connections
 ```
 
-Then, they have access to a list of dataflow specifications stored in DfAnalyzer's database.
+The screenshots below show the dataflow of our libMesh application (*systems_of_equations_ex2*), recorded by its original C++ instrumentation (see [how to reproduce them](#run-against-the-current-dfanalyzer-docker)).
+
+The first page lists the dataflows stored in DfAnalyzer's database, with their structure, versions, executions and tasks, and the state of the ingestion queue.
+
+![List of dataflows in DfA Studio](./img/studio-dataflows.png)
+
+Clicking on a dataflow opens its provenance graph. In the dataset perspective, datasets are nodes and data transformations are edges; selecting a dataset shows its schema (*i.e.*, the attributes and their types). The graph can also be shown with transformations as nodes, restricted to one execution, and exported as SVG, PNG or [W3C PROV-JSON](https://www.w3.org/submissions/prov-json/).
+
+![Dataset perspective of systems_of_equations_ex2](./img/studio-dataset-view.png)
+
+*Rastrear origem* (trace origin) lists every dataset a node derives from, and every dataset that depends on it. The figure shows the lineage of *oextract_data*.
+
+![Lineage of oextract_data](./img/studio-lineage.png)
+
+The *Consulta* (query) tab builds the query for the user: they choose the datasets, the attributes to project and the conditions, and DfA Studio finds the path between the datasets, shows the SQL and the result, and exports it as CSV or as a Jupyter notebook. Values in conditions are validated against the catalog and sent as parameters, never concatenated into the SQL.
+
+![Query specification in DfA Studio](./img/studio-query.png)
+
+The *Analytics* tab shows executions per version, the task timeline and the ingestion health, and *Galeria* profiles datasets and attributes. More details are in [DfAnalyzer/studio/README.md](./DfAnalyzer/studio/README.md).
+
+#### Dataflow Viewer (DfViewer)
+
+The previous interface is still available at `http://localhost:22000`. It lists the dataflow specifications stored in DfAnalyzer's database and shows the dataset perspective of a dataflow, as in the figures below.
 
 ![List of dataflow specifications](./img/dfa-webpage.png)
 
-Since users have decided to view a specific dataflow by clicking on the button with the name *View* (*e.g.*, to analyze dataflow specification with tag *systems_of_equations_ex2*), then the following web page will be provided to them. This visualization consists of a dataset perspective view of the dataflow specification, where users can investigate the schema (*i.e.*, attributes of each dataset).
-
-![List of dataflow specifications](./img/dfviewer-libmesh-app.png)
+![Dataset perspective in DfViewer](./img/dfviewer-libmesh-app.png)
 
 #### Query Interface (QI)
 
@@ -270,7 +312,7 @@ Selections | selection(conditions) | *conditions* is used to filter only relevan
 
 **Example**
 
-Considering our libMesh application (more details below) instrumented to extract provenance and scientific data using DfAnalyzer, users might like to investigate the data element flow from the input dataset *osolve_equation_systems* to the output dataset *oextract_data*, when the velocity of the fluid at the axis x is greater than 0.01. More specifically, they want to know in which times and distances (*oextract_data.x*, which is equivalent to the point in coordinate x) this situation occurs. The figure below presents the dataflow fragment analyzed by this query.
+Considering our libMesh application (more details below) instrumented to extract provenance and scientific data using DfAnalyzer, users might like to investigate the data element flow from the dataset *osolve_equation_systems* to the dataset *owrite_mesh*, when the nonlinear solver step changed the solution by more than 0.01 (*osolve_equation_systems.norm_delta*). More specifically, they want to know in which times this situation occurs and which mesh file was written. The figure below presents the dataflow fragment analyzed by this query, as drawn by the previous interface.
 
 ![Dataflow representation of the application systems_of_equations_ex2](./img/dfviewer-zoom.png)
 
@@ -278,7 +320,7 @@ Based on this dataflow analysis, an HTTP request has to be submitted to our REST
 
 URL:
 ```
-http://localhost:22000/query_interface/systems_of_equations_ex2/2
+http://localhost:22000/query_interface/systems_of_equations_ex2/1
 ``` 
 
 Message:
@@ -286,18 +328,18 @@ Message:
 ```
 mapping(physical)
 source(osolve_equation_systems)
-target(oextract_data)
-projection(osolve_equation_systems.time; oextract_data.x;oextract_data.u)
-selection(oextract_data.u > 0.01)
+target(owrite_mesh)
+projection(osolve_equation_systems.time;osolve_equation_systems.norm_delta;owrite_mesh.filename)
+selection(osolve_equation_systems.norm_delta > 0.01)
 ```
 
-As a result, our RESTful API returns a CSV-format file with the selected content after the query processing.
+As a result, our RESTful API returns the generated SQL, and the result can be downloaded as a CSV file from `http://localhost:22000/downloadCSV`.
 
-#### Query Dashboard (QD)
+The attributes of *oextract_data* (*u*, *v*, *w*, *p*, *x*, *y* and *z*) come from raw data extraction: their values are kept in the FastBit index written by RDE and RDI, and the relational tables keep only the path of that index. Conditions on them, such as `oextract_data.u > 0.01`, therefore return no rows from the database.
 
-Besides the query processing capabilities provided by QI, users can develop their queries using our graphical interface, as follows:
+#### API v2
 
-![Query specification using our graphical interface](./img/query-dashboard.png)
+DfA Studio is built on a JSON API under `/api/v2` (catalog, provenance graph, lineage, paginated queries, PROV-JSON, analytics and annotations). Its contract is written in OpenAPI and served at `http://localhost:22000/api/openapi.yaml`; the build checks that the contract matches the Java classes.
 
 ### DfA-lib in C++ and Python
 
@@ -324,9 +366,11 @@ LDFLAGS  += -lcurl -L$(DFANALYZER_DIR)/lib -ldfanalyzer
 
 Then, he can run the command make for generating an executable file of his application.
 
-# Docker image
+# Docker images
 
-Besides the source code of DfAnalyzer tool and its libraries, we also provide a Docker image, named as **dataflow_analyzer**, with DfAnalyzer tool; its libraries in C++ and Python, known as *dfa-lib*; and two Computational Science and Engineering (CSE) applications, named as *systems_of_equations_ex2* and *prototype_multi-physics*. 
+The `Dockerfile` at the root of this repository builds DfAnalyzer from source (see [Quick start with Docker](#quick-start-with-docker)).
+
+We also provide a Docker image, named as **dataflow_analyzer**, with the 2019 release of DfAnalyzer tool; its libraries in C++ and Python, known as *dfa-lib*; and two Computational Science and Engineering (CSE) applications, named as *systems_of_equations_ex2* and *prototype_multi-physics*. 
 
 The CSE application *systems_of_equations_ex2* was downloaded from [an example in libMesh website](https://libmesh.github.io/examples/systems_of_equations_ex2.html) and developed using *dfa-lib* in C++, while the application *prototype_multi-physics* used *dfa-lib* in Python. 
 
@@ -418,6 +462,27 @@ Command lines to the second terminal connection (*CSE application*):
 cd applications/systems_of_equations_ex2
 ./run.sh
 ```
+
+#### Run against the current DfAnalyzer (Docker)
+
+The application compiled in the **dataflow_analyzer** image can also record its provenance in the current DfAnalyzer, which is how the DfA Studio screenshots above were produced. *dfa-lib-cpp* sends its messages to `localhost:22000`, so the application container joins the network of the DfAnalyzer container. Both containers share the `rde` directory, because PDE reads the index files written by the raw data extraction.
+
+```bash
+docker build -t dfanalyzer .
+docker volume create libmesh-rde
+
+docker run -d --name dfanalyzer -p 22000:22000 \
+  -v libmesh-rde:/dfanalyzer/applications/systems_of_equations_ex2/rde \
+  -e DFA_URL=http://0.0.0.0:22000 -w /opt/DfAnalyzer \
+  --entrypoint sh dfanalyzer start-dfanalyzer.sh
+
+docker run --rm --network container:dfanalyzer \
+  -v libmesh-rde:/dfanalyzer/applications/systems_of_equations_ex2/rde \
+  -w /dfanalyzer/applications/systems_of_equations_ex2 \
+  --entrypoint bash vitorss/dataflow_analyzer:latest ./run.sh
+```
+
+The **dataflow_analyzer** image has about 5 GB to download (12 GB on disk). The run takes a few minutes and records 47 tasks over 15 time steps, the same tables and row counts recorded by the DfAnalyzer release shipped in that image.
 
 ### Prototype of Multiphysics Application
 

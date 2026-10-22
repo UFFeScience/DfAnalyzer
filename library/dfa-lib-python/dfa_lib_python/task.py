@@ -5,29 +5,18 @@ from .dependency import Dependency
 from .task_status import TaskStatus
 from .dataset import DataSet
 from .performance import Performance
+from .execution import get_execution_tag
+from .response import check_response
 from datetime import datetime
 
 dfa_url = os.environ.get('DFA_URL',"http://localhost:22000/")
 
 
 class Task(ProvenanceObject):
-    """
-    This class defines a dataflow task.
-
-    Attributes:
-        - id (:obj:`str`): Task Id.
-        - dataflow_tag (:obj:`str`): Dataflow tag.
-        - transformation_tag (:obj:`str`): Transformation tag.
-        - sub_id (:obj:`str`, optional): Task Sub Id.
-        - dependency (:obj:`Task`): Task which the object has a dependency.
-        - workspace (:obj:`str`, optional): Task workspace.
-        - resource (:obj:`str`, optional): Task resource.
-        - output (:obj:`str`, optional): Task output.
-        - error (:obj:`str`, optional): Task error.
-    """
+    """This class defines a dataflow task."""
     def __init__(self, id, dataflow_tag, transformation_tag,
                  sub_id="", dependency=None, workspace="", resource="",
-                 output="", error=""):
+                 output="", error="", execution_tag=None):
         ProvenanceObject.__init__(self, transformation_tag)
         self._workspace = workspace
         self._resource = resource
@@ -37,6 +26,7 @@ class Task(ProvenanceObject):
         self._sets = []
         self._status = TaskStatus.READY.value
         self._dataflow = dataflow_tag.lower()
+        self._execution = execution_tag or get_execution_tag()
         self._transformation = transformation_tag.lower()
         self._id = str(id)
         self._sub_id = sub_id
@@ -94,7 +84,7 @@ class Task(ProvenanceObject):
         """        
         self.set_status(TaskStatus.RUNNING)
         self.start_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        self.save()
+        self.save()      
 
     def end(self):
         """ Send a post request to the Dataflow Analyzer API to store the Task.
@@ -103,8 +93,8 @@ class Task(ProvenanceObject):
         self.end_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         performance = Performance(self.start_time, self.end_time)
         self._performances.append(performance.get_specification())
-        self.save()
-
+        self.save()   
+        
     def save(self):
         """ Send a post request to the Dataflow Analyzer API to store the Task.
         """
@@ -112,3 +102,5 @@ class Task(ProvenanceObject):
         message = self.get_specification()
         r = requests.post(url, json=message)
         print(r.status_code)
+        check_response(r, f"task {self._id} de '{self._transformation}'")
+        self._sets = []

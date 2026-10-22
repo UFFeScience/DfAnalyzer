@@ -20,3 +20,37 @@ applications/systems_of_equations_ex2/systems_of_equations_ex2\.x86_64-unknown-l
 *.o
 
 *.so
+
+# --- Java / Maven ---
+*.class
+
+DfAnalyzer/studio/node_modules/
+DfAnalyzer/studio/dist/
+DfAnalyzer/studio/node/
+DfAnalyzer/studio/.vite/
+npm-debug.log*
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+*.swp
+*.swo
+*~
+
+.env
+.pytest_cache/
+
+# --- gerado em tempo de execução ---
+# start-dfanalyzer.sh reescreve este arquivo a cada boot.
+DfAnalyzer/DfA.properties
+DfAnalyzer/data/
+DfAnalyzer/*.log
+DfAnalyzer/log_dfa.txt
+DfAnalyzer/database.conf
+DfAnalyzer/nodes.txt
+
+# --- editores / SO ---
+.idea/
+.vscode/
+.DS_Store

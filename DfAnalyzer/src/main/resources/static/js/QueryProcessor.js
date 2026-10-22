@@ -23,7 +23,6 @@ var app = new Vue({
                 url: "/dfview/query",
                 data: JSON.stringify(this.input_form), // Note it is important
                 success: function (result) {
-                    alert("dkdmdkmdkdd" + result);
                     self.table = result;
                 },
                 error: function (e) {

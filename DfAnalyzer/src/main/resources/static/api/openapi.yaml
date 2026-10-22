@@ -1,0 +1,1187 @@
+openapi: 3.0.3
+
+info:
+  title: DfAnalyzer API v2
+  version: "2.0.0"
+  description: |
+    Contrato da API v2 do DfAnalyzer.
+
+    **Contrato-primeiro.** Este arquivo é a fonte da verdade, e não um subproduto
+    gerado a partir das classes. Duas coisas o mantêm honesto:
+
+    * `OpenApiContractTest` (Java) compara, em tempo de build, cada propriedade
+      declarada aqui com os campos reais dos DTOs. Um campo novo no Java sem
+      entrada aqui — ou o contrário — quebra a suíte.
+    * `npm run api:types` no `studio/` regenera os tipos TypeScript a partir
+      deste arquivo, então o front não consegue ler um campo que o contrato não
+      declara.
+
+    A v1 (`/api/dataflows/*`, `/query_interface/*`) continua viva enquanto a
+    interface Thymeleaf antiga existir, e **não** está descrita aqui — exceto o
+    contrato de erro da consulta, que mudou com a correção da injeção de SQL e por
+    isso está documentado.
+
+servers:
+  - url: /
+    description: A própria instância do DfAnalyzer
+
+tags:
+  - name: catálogo
+    description: Leitura da proveniência prospectiva e do estado da ingestão
+  - name: grafo
+    description: O grafo de proveniência e a linhagem sobre ele
+  - name: consulta
+    description: Interface de consulta sobre a proveniência
+  - name: anotações
+    description: Observações do pesquisador ancoradas em nós do grafo
+  - name: analytics
+    description: Versões×execuções, linha do tempo de tasks e saúde da ingestão
+
+paths:
+  /api/v2/dataflows:
+    get:
+      tags: [catálogo]
+      summary: Lista os dataflows com um resumo de cada um
+      description: |
+        Uma única consulta ao banco devolve estrutura, versões, execuções,
+        tasks, última execução e duração média de todos os dataflows da página.
+        A alternativa seria uma requisição por dataflow.
+      operationId: listDataflows
+      parameters:
+        - name: page
+          in: query
+          description: Página, base zero. Valores negativos viram 0.
+          required: false
+          schema: { type: integer, format: int32, default: 0, minimum: 0 }
+        - name: size
+          in: query
+          description: |
+            Itens por página. Limitado a 200 no servidor: um cliente não
+            consegue pedir a tabela inteira mandando um número grande.
+          required: false
+          schema: { type: integer, format: int32, default: 25, minimum: 1, maximum: 200 }
+      responses:
+        "200":
+          description: Página de resumos
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DataflowSummaryPage" }
+
+  /api/v2/overview:
+    get:
+      tags: [catálogo]
+      summary: Contadores gerais e saúde da fila de ingestão
+      description: |
+        Os contadores da fila vinham sendo coletados pelo `ProvenanceQueue`
+        desde sempre sem que nada os lesse. `queuePending` importa porque uma
+        task que não chega ao banco é uma falha silenciosa.
+      operationId: getOverview
+      responses:
+        "200":
+          description: Contadores
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Overview" }
+
+  /api/v2/ingestion/pending:
+    get:
+      tags: [catálogo]
+      summary: Transações ainda na fila de ingestão
+      description: |
+        O conteúdo da fila que `queuePending` só conta: o tipo de cada
+        transação e o dataflow a que pertence, até cem itens. A fila vive na
+        memória do processo; depois de ingerida, a transação sai daqui.
+      operationId: getPendingTransactions
+      responses:
+        "200":
+          description: Transações pendentes, na ordem da fila
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PendingTransaction" }
+
+  /api/v2/dataflows/{id}/graph:
+    get:
+      tags: [grafo]
+      summary: Grafo de proveniência prospectiva de uma versão do dataflow
+      description: |
+        Duas leituras do mesmo catálogo:
+
+        * `view=transformation` — **PROV-correta**: a transformação é o nó
+          (Activity) e o dataset é a aresta (Entity). A interface antiga só
+          oferecia a leitura inversa.
+        * `view=dataset` — a leitura da interface antiga, mantida porque quem já
+          usa a ferramenta pensa nela assim.
+
+        As duas saem de um único carregamento do catálogo, então trocar de visão
+        no cliente não custa consulta nova ao banco.
+
+        Na visão de transformações, um dataset sem produtor ou sem consumidor não
+        tem duas pontas para virar aresta. Em vez de sumir — o que esconderia
+        justamente a entrada e a saída do pipeline — ele entra como nó de dataset.
+      operationId: getGraph
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: "`dataflow.id`, como devolvido por `/api/v2/dataflows`."
+          schema: { type: integer, format: int32 }
+        - name: view
+          in: query
+          required: false
+          schema: { type: string, enum: [transformation, dataset], default: transformation }
+        - name: version
+          in: query
+          required: false
+          description: Versão da definição. Omitida, usa a mais recente.
+          schema: { type: integer, format: int32 }
+      responses:
+        "200":
+          description: O grafo
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GraphResponse" }
+        "400":
+          description: "`view` inválida"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiError" }
+        "404":
+          description: Dataflow ou versão inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiError" }
+
+  /api/v2/dataflows/{id}/lineage:
+    get:
+      tags: [grafo]
+      summary: Linhagem de um nó — de onde veio e o que afetou
+      description: |
+        Expõe uma capacidade que o backend sempre teve e a interface antiga
+        nunca mostrou.
+
+        Devolve **apenas ids**: quem pediu a linhagem já tem o grafo carregado, e
+        o que falta é saber o que acender e o que esmaecer.
+
+        Uma aresta entra em `edges` só quando liga dois nós do **mesmo lado** do
+        foco. Sem essa restrição, o realce acenderia caminhos que passam ao largo
+        do nó — sugerindo influência que não existe entre nós irmãos.
+      operationId: getLineage
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int32 }
+        - name: node
+          in: query
+          required: true
+          description: Id do nó em foco, como aparece em `GraphNode.id`.
+          schema: { type: string }
+        - name: view
+          in: query
+          required: false
+          schema: { type: string, enum: [transformation, dataset], default: transformation }
+        - name: version
+          in: query
+          required: false
+          schema: { type: integer, format: int32 }
+      responses:
+        "200":
+          description: A linhagem
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LineageResponse" }
+        "404":
+          description: Dataflow, versão ou nó inexistente nesta visão
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiError" }
+
+  /api/v2/dataflows/{id}/query:
+    post:
+      tags: [consulta]
+      summary: Executa uma consulta de proveniência e devolve os dados
+      description: |
+        Substitui `/query_interface`. Três diferenças que importam:
+
+        * **devolve dados, não um caminho de arquivo.** A v1 escrevia um CSV no
+          disco do servidor com `COPY … INTO` e mandava o caminho para o cliente
+          buscar. Isso obrigava o cliente a saber o sistema de arquivos do
+          servidor e era o vetor da injeção de SQL;
+        * **é paginada e tem limite obrigatório**;
+        * **os fragmentos passam pelo mesmo `QueryGuard`** que já protege a v1:
+          projeções, seleções e tags são validadas contra o catálogo e
+          **reemitidas** a partir das partes analisadas.
+
+        A SQL gerada volta no corpo (`sql`) de propósito: quem monta a consulta
+        pelo construtor visual aprende o SQL correspondente sem precisar
+        escrevê-lo.
+      operationId: runQueryV2
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int32 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/QueryRequest" }
+      responses:
+        "200":
+          description: As linhas encontradas
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueryResult" }
+        "400":
+          description: |
+            A especificação não passou na validação de catálogo. `message` é a
+            mensagem para o usuário, em português.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiError" }
+        "404":
+          description: Dataflow ou versão inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiError" }
+
+  /api/v2/dataflows/{id}/prov.json:
+    get:
+      tags: [consulta]
+      summary: Exporta a proveniência prospectiva em PROV-JSON (W3C)
+      description: |
+        Interoperabilidade com o padrão W3C PROV.
+
+        O mapeamento é o mesmo que a visão de transformações do grafo já assume:
+        transformação → `prov:Activity`, dataset → `prov:Entity`, e as
+        dependências viram `prov:used` e `prov:wasGeneratedBy`.
+
+        **Escopo:** só a proveniência **prospectiva** (a definição). A
+        retrospectiva — tasks e elementos — fica para uma versão futura,
+        porque exportar execução sem poder compará-la na interface seria exportar
+        o que ninguém consegue conferir.
+      operationId: exportProvJson
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int32 }
+        - name: version
+          in: query
+          required: false
+          schema: { type: integer, format: int32 }
+      responses:
+        "200":
+          description: Documento PROV-JSON
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProvDocument" }
+        "404":
+          description: Dataflow ou versão inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiError" }
+
+  /api/v2/dataflows/{id}/versions:
+    get:
+      tags: [analytics]
+      summary: Versões da definição, cada uma com seus contadores de execução
+      description: |
+        Metade "versões" do painel de versões × execuções. `version` é o eixo da
+        *definição* do pipeline; dentro de cada versão pode haver várias
+        execuções — ver `/versions/{version}/executions`.
+      operationId: listVersions
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int32 }
+      responses:
+        "200":
+          description: Versões, mais recente primeiro
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/VersionSummary" }
+        "404":
+          description: Dataflow inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiError" }
+
+  /api/v2/dataflows/{id}/versions/{version}/executions:
+    get:
+      tags: [analytics]
+      summary: Execuções de uma versão, com status, duração e contagem de tasks
+      description: Metade "execuções" do painel de versões × execuções.
+      operationId: listExecutions
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int32 }
+        - name: version
+          in: path
+          required: true
+          schema: { type: integer, format: int32 }
+      responses:
+        "200":
+          description: Execuções, mais recente primeiro
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ExecutionSummary" }
+        "404":
+          description: Dataflow ou versão inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiError" }
+
+  /api/v2/dataflows/{id}/executions/{execId}/timeline:
+    get:
+      tags: [analytics]
+      summary: Linha do tempo das tasks de uma execução, por transformação
+      description: |
+        Uma barra por transformação: início e fim são o mínimo e o máximo entre
+        `performance.starttime/endtime` das tasks daquela transformação nesta
+        execução. `startOffsetSeconds` é relativo ao início da própria
+        execução, não ao relógio — o gráfico é da execução, não de um horário
+        do dia.
+
+        `anomalies` são as tasks que não terminaram limpas: `RUNNING` (ainda em
+        curso, ou travada) ou `FINISHED_WITH_ERROR`. Não existe uma contagem de
+        "tasks esperadas": o esquema registra o que aconteceu, não o que
+        deveria ter acontecido, e inventar essa razão seria um número plausível
+        e falso — pior, numa ferramenta de proveniência, que não ter o número.
+      operationId: getExecutionTimeline
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int32 }
+        - name: execId
+          in: path
+          required: true
+          schema: { type: integer, format: int32 }
+      responses:
+        "200":
+          description: A linha do tempo
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecutionTimeline" }
+        "404":
+          description: Dataflow ou execução inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiError" }
+
+  /api/v2/dataflows/{id}/ingestion-health:
+    get:
+      tags: [analytics]
+      summary: Saúde da ingestão deste dataflow
+      description: |
+        Os contadores globais da fila (transações pendentes, processadas,
+        tempo total, erros) já estão em `/api/v2/overview` — são do processo
+        de ingestão, não de um dataflow específico. Esta rota é o que é
+        específico de um pipeline: quantas das suas tasks terminaram em erro
+        ou seguem em execução, e em qual execução olhar primeiro.
+      operationId: getIngestionHealth
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int32 }
+      responses:
+        "200":
+          description: Contadores de saúde
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IngestionHealth" }
+        "404":
+          description: Dataflow inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiError" }
+
+  /api/v2/dataflows/{id}/ingestion-throughput:
+    get:
+      tags: [analytics]
+      summary: Tasks concluídas por hora nas últimas 24h
+      description: |
+        24 baldes de uma hora a partir de `performance.endtime` — a mesma
+        coluna que já sustenta a duração média em `DataflowSummary`. Sem
+        tabela nova.
+      operationId: getIngestionThroughput
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int32 }
+      responses:
+        "200":
+          description: Série horária
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IngestionThroughput" }
+        "404":
+          description: Dataflow inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiError" }
+
+  /api/v2/dataflows/{id}/annotations:
+    get:
+      tags: [anotações]
+      summary: Anotações do pesquisador neste dataflow
+      description: |
+        O caderno de laboratório dentro da ferramenta.
+
+        A âncora (`target`) é a **tag do nó** do grafo (`t:preparardados`,
+        `d:opreparardados`), não um id numérico: tags sobrevivem a uma nova
+        versão do dataflow, ids não. Uma nota escrita hoje precisa continuar
+        valendo depois do próximo `df.save()`.
+
+        Pelo mesmo motivo a anotação **não** é vinculada a uma versão: ela é
+        sobre a etapa, não sobre uma versão dela.
+      operationId: listAnnotations
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int32 }
+      responses:
+        "200":
+          description: As anotações, da mais recente para a mais antiga
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Annotation" }
+        "404":
+          description: Dataflow inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiError" }
+    post:
+      tags: [anotações]
+      summary: Cria uma anotação
+      operationId: createAnnotation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int32 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AnnotationRequest" }
+      responses:
+        "200":
+          description: A anotação criada
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Annotation" }
+        "400":
+          description: Corpo vazio, alvo ausente ou texto longo demais
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiError" }
+        "404":
+          description: Dataflow inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiError" }
+
+  /api/v2/annotations/{annotationId}:
+    delete:
+      tags: [anotações]
+      summary: Apaga uma anotação
+      operationId: deleteAnnotation
+      parameters:
+        - name: annotationId
+          in: path
+          required: true
+          schema: { type: integer, format: int32 }
+      responses:
+        "200":
+          description: Apagada
+        "404":
+          description: Anotação inexistente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiError" }
+
+  /query_interface/{df_tag}/{df_id}:
+    post:
+      tags: [consulta]
+      summary: Executa uma consulta de proveniência (API v1)
+      description: |
+        Documentado aqui apenas porque **o contrato de erro mudou** com a
+        correção da injeção de SQL. Projeções, seleções e tags de dataset passam por
+        uma allowlist derivada do catálogo (`qp.query.QueryGuard`) e são
+        reemitidas a partir das partes analisadas; nada do que o cliente digitou
+        é repassado literalmente. O que não passa vira **400 com mensagem
+        legível**, e não mais uma SQL concatenada.
+
+        `df_id` é a **versão** do dataflow, não o id na tabela `dataflow`.
+      operationId: runQuery
+      parameters:
+        - name: df_tag
+          in: path
+          required: true
+          schema: { type: string }
+        - name: df_id
+          in: path
+          required: true
+          description: Versão do dataflow (`dataflow_version.version`)
+          schema: { type: integer, format: int32 }
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                message:
+                  type: string
+                  description: |
+                    Uma função de consulta por linha:
+                    `mapping(...)`, `source(...)`, `target(...)`,
+                    `include(...)`, `exclude(...)`, `projection(...)`,
+                    `selection(...)`. Dentro dos parênteses, `;` separa
+                    argumentos.
+              required: [message]
+            example:
+              message: |
+                mapping(logical)
+                source(iextrairnumeros)
+                target(oexecutarsoma)
+                projection(oexecutarsoma.resultado_soma)
+      responses:
+        "200":
+          description: SQL gerada, tempo decorrido e caminho do CSV de resultado
+          content:
+            text/plain:
+              schema: { type: string }
+        "400":
+          description: |
+            A especificação não passou na validação de catálogo. O corpo é a
+            mensagem para o usuário.
+          content:
+            text/plain:
+              schema: { type: string }
+              example: >-
+                Dataset desconhecido em source(): 'task'. Datasets disponiveis:
+                iextrairnumeros, oextrairnumeros, oexecutarsoma.
+
+components:
+  schemas:
+
+    DataflowSummaryPage:
+      type: object
+      description: Envelope de paginação, comum a toda coleção da v2.
+      required: [items, page, size, total, hasMore]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/DataflowSummary" }
+        page:
+          type: integer
+          format: int32
+          description: Página devolvida, base zero.
+        size:
+          type: integer
+          format: int32
+          description: Tamanho de página efetivo, já limitado pelo servidor.
+        total:
+          type: integer
+          format: int64
+          description: Total de dataflows, independente da página.
+        hasMore:
+          type: boolean
+          description: Se existe página seguinte.
+
+    DataflowSummary:
+      type: object
+      description: |
+        **`versions` e `executions` são eixos diferentes.**
+        `versions` conta mudanças na *definição* do pipeline; `executions` conta
+        *rodadas*. Uma versão pode ter muitas execuções.
+
+        **Origem do mapeamento.** `origin` e `generator` vêm da versão
+        mais recente da definição, como o cliente as declarou ao salvar. Não há
+        nota de confiança: nada a mede.
+      required:
+        - id
+        - tag
+        - transformations
+        - datasets
+        - versions
+        - executions
+        - tasks
+        - tasksRunning
+        - tasksReady
+        - lastRun
+        - avgDurationSeconds
+        - status
+        - origin
+        - generator
+      properties:
+        id:
+          type: integer
+          format: int32
+          description: Chave em `dataflow.id`.
+        tag:
+          type: string
+          description: Nome do dataflow, como o script o registrou.
+        transformations: { type: integer, format: int32 }
+        datasets: { type: integer, format: int32 }
+        versions:
+          type: integer
+          format: int32
+          description: Quantas vezes a definição prospectiva foi salva.
+        executions:
+          type: integer
+          format: int32
+          description: Rodadas, somando todas as versões.
+        tasks: { type: integer, format: int32 }
+        tasksRunning: { type: integer, format: int32 }
+        tasksReady: { type: integer, format: int32 }
+        lastRun:
+          type: string
+          nullable: true
+          description: |
+            Sempre presente no corpo, podendo ser `null` -- por isso esta em
+            `required`. `performance.endtime` mais recente, no formato
+            `yyyy-MM-dd HH:mm:ss` em que o banco o guarda. Nulo se nenhuma task
+            registrou desempenho.
+          example: "2026-08-26 15:02:45"
+        avgDurationSeconds:
+          type: number
+          format: double
+          nullable: true
+          description: |
+            Média de segundos por registro de desempenho. **Nulo**, e não zero,
+            quando não há o que medir — zero seria uma medição, nulo é a
+            ausência dela.
+        status:
+          $ref: "#/components/schemas/DataflowStatus"
+        origin:
+          $ref: "#/components/schemas/MappingOrigin"
+        generator:
+          type: string
+          nullable: true
+          description: |
+            Quem gerou o mapeamento, como o cliente declarou ao salvar a
+            definição (ex.: nome e versão da ferramenta). `null` quando
+            não declarado.
+
+    MappingOrigin:
+      type: string
+      nullable: true
+      enum: [manual, generated, curated, null]
+      description: |
+        Quem escreveu a definição prospectiva:
+        `manual` (instrumentação escrita à mão), `generated` (gerada por uma
+        ferramenta e usada sem alteração), `curated` (gerada e revisada por
+        uma pessoa). **`null` = não declarado** — toda versão
+        gravada antes deste campo existir e todo script que não informa. Não é inferido:
+        origem não declarada não é tratada como manual.
+
+    DataflowStatus:
+      type: string
+      description: |
+        Derivado das contagens de task, não armazenado.
+      enum: [EMPTY, RUNNING, READY, FINISHED]
+
+    GraphResponse:
+      type: object
+      required: [dataflowId, dataflowTag, version, view, nodes, edges]
+      properties:
+        dataflowId: { type: integer, format: int32 }
+        dataflowTag: { type: string }
+        version:
+          type: integer
+          format: int32
+          description: Versão da **definição** cujo grafo é este.
+        view:
+          type: string
+          enum: [TRANSFORMATION, DATASET]
+        nodes:
+          type: array
+          items: { $ref: "#/components/schemas/GraphNode" }
+        edges:
+          type: array
+          items: { $ref: "#/components/schemas/GraphEdge" }
+
+    GraphNode:
+      type: object
+      required: [id, tag, kind, role, attributes, tasks]
+      properties:
+        id:
+          type: string
+          description: |
+            Prefixado por `t:` ou `d:`. O prefixo evita colisão quando uma
+            transformação e um dataset têm a mesma tag — possível, já que são
+            vocabulários independentes.
+          example: "t:preparardados"
+        tag: { type: string }
+        kind:
+          type: string
+          enum: [TRANSFORMATION, DATASET]
+          description: PROV Activity ou PROV Entity.
+        role:
+          type: string
+          nullable: true
+          enum: [SOURCE, INTERMEDIATE, SINK]
+          description: |
+            Sempre presente no corpo, podendo ser `null`. Papel do dataset no
+            fluxo; é `null` para nós de transformação.
+        attributes:
+          type: array
+          nullable: true
+          description: Sempre presente, `null` para nós de transformação.
+          items: { $ref: "#/components/schemas/AttributeInfo" }
+        tasks:
+          type: integer
+          format: int32
+          nullable: true
+          description: |
+            Sempre presente no corpo, hoje sempre `null`. Reservado para a
+            contagem de tasks por nó.
+
+    AttributeInfo:
+      type: object
+      required: [name, type]
+      properties:
+        name: { type: string }
+        type:
+          type: string
+          nullable: true
+          description: |
+            Vocabulário fechado do DfAnalyzer (`TEXT`, `NUMERIC`, `FILE`).
+            É ele que determina os operadores que o construtor de
+            consultas pode oferecer.
+
+    GraphEdge:
+      type: object
+      required: [id, source, target, label]
+      properties:
+        id: { type: string }
+        source: { type: string }
+        target: { type: string }
+        label:
+          type: string
+          description: |
+            Tag do objeto que a aresta representa — um dataset na visão de
+            transformações, uma transformação na visão de datasets.
+
+    LineageResponse:
+      type: object
+      required: [focus, upstream, downstream, edges]
+      properties:
+        focus: { type: string }
+        upstream:
+          type: array
+          description: Ids dos nós dos quais o foco descende.
+          items: { type: string }
+        downstream:
+          type: array
+          description: Ids dos nós afetados pelo foco.
+          items: { type: string }
+        edges:
+          type: array
+          description: Ids das arestas a realçar.
+          items: { type: string }
+
+    QueryRequest:
+      type: object
+      description: |
+        Os mesmos campos que a linguagem de consulta da v1 aceita, em JSON.
+        Manter a mesma forma é deliberado: assim o `QueryGuard` — que já é o
+        oráculo de segurança testado — continua sendo o único validador, em vez
+        de existirem dois caminhos com regras diferentes.
+      required: [projections]
+      properties:
+        version:
+          type: integer
+          format: int32
+          nullable: true
+          description: Versão da definição. Omitida, usa a mais recente.
+        execution:
+          type: integer
+          format: int32
+          nullable: true
+          description: |
+            Restringe a consulta a uma execução. Tem de pertencer à
+            versão pedida; caso contrário, 400. A restrição é aplicada como
+            uma condição comum, gerada a partir dos ids de task da execução —
+            nenhuma mudança na gramática do `QueryGuard`.
+        mapping:
+          type: string
+          enum: [LOGICAL, PHYSICAL, HYBRID]
+          default: LOGICAL
+          description: |
+            Como dois datasets vizinhos são ligados na SQL: por atributos de
+            mesmo nome (`LOGICAL`), pelo id da task (`PHYSICAL`) ou ambos.
+        sources:
+          type: array
+          description: Tags dos datasets de partida. Vazio = consulta a um só dataset.
+          items: { type: string }
+        targets:
+          type: array
+          items: { type: string }
+        includes:
+          type: array
+          description: Datasets que o caminho precisa atravessar.
+          items: { type: string }
+        excludes:
+          type: array
+          description: Datasets que o caminho não pode atravessar.
+          items: { type: string }
+        projections:
+          type: array
+          minItems: 1
+          description: |
+            Colunas, sempre qualificadas (`dataset.atributo`). Uma projeção que
+            não exista no catálogo é erro 400, não uma coluna vazia.
+          items: { type: string }
+        selections:
+          type: array
+          description: |
+            Condições, uma por item, unidas por `AND`. A gramática aceita
+            `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`, `LIKE`, `IN`, `BETWEEN` e
+            `IS [NOT] NULL`. O construtor visual monta estas strings a
+            partir do tipo do atributo; o editor avançado deixa escrevê-las.
+          items: { type: string }
+        page:
+          type: integer
+          format: int32
+          default: 0
+          minimum: 0
+        size:
+          type: integer
+          format: int32
+          default: 100
+          minimum: 1
+          maximum: 1000
+          description: Limitado no servidor — não há como pedir a tabela inteira.
+
+    QueryResult:
+      type: object
+      required: [sql, columns, rows, page, size, hasMore, elapsedMs]
+      properties:
+        sql:
+          type: string
+          description: |
+            A SQL efetivamente executada, já com o `LIMIT`/`OFFSET`. Devolvida
+            para que o construtor visual seja também um material de aprendizado.
+        columns:
+          type: array
+          items: { $ref: "#/components/schemas/QueryColumn" }
+        rows:
+          type: array
+          description: |
+            Linhas na ordem de `columns`. Cada célula é string ou `null` — a
+            formatação por tipo é do cliente, que tem `columns[].type`.
+          items:
+            type: array
+            items:
+              type: string
+              nullable: true
+        page: { type: integer, format: int32 }
+        size: { type: integer, format: int32 }
+        hasMore:
+          type: boolean
+          description: |
+            Calculado pedindo uma linha a mais que `size`. Não há `total`: contar
+            todas as linhas de um produto cartesiano custa a consulta inteira, e
+            a paginação não precisa disso.
+        elapsedMs:
+          type: number
+          format: double
+
+    QueryColumn:
+      type: object
+      required: [name, type]
+      properties:
+        name:
+          type: string
+          description: Como veio da projeção, qualificado por dataset.
+        type:
+          type: string
+          nullable: true
+          description: |
+            Tipo do atributo no catálogo (`TEXT`, `NUMERIC`, `FILE`),
+            ou `null` para colunas que o catálogo não descreve, como
+            `<transformação>_task_id`.
+
+    ProvDocument:
+      type: object
+      description: |
+        Documento PROV-JSON (W3C PROV-DM). As chaves de `entity`, `activity`,
+        `used` e `wasGeneratedBy` são identificadores com prefixo `dfa:`.
+      required: [prefix, entity, activity, used, wasGeneratedBy]
+      properties:
+        prefix:
+          type: object
+          additionalProperties: { type: string }
+          description: Prefixos usados, incluindo `dfa` e `prov`.
+        entity:
+          type: object
+          additionalProperties: { type: object, additionalProperties: true }
+          description: Datasets. Cada um traz `dfa:tag` e a lista de atributos.
+        activity:
+          type: object
+          additionalProperties: { type: object, additionalProperties: true }
+          description: Transformações.
+        used:
+          type: object
+          additionalProperties: { type: object, additionalProperties: true }
+          description: Atividade consumiu entidade.
+        wasGeneratedBy:
+          type: object
+          additionalProperties: { type: object, additionalProperties: true }
+          description: Entidade foi gerada por atividade.
+
+    Annotation:
+      type: object
+      required: [id, dataflowId, target, body, author, createdAt]
+      properties:
+        id: { type: integer, format: int32 }
+        dataflowId: { type: integer, format: int32 }
+        target:
+          type: string
+          description: Id do nó do grafo, como aparece em `GraphNode.id`.
+          example: "t:preparardados"
+        body: { type: string }
+        author:
+          type: string
+          nullable: true
+          description: Sempre presente no corpo, podendo ser `null`.
+        createdAt:
+          type: string
+          description: |
+            `yyyy-MM-dd HH:mm:ss`, o mesmo formato de `performance.starttime` —
+            e com a mesma limitação (sem fuso). Ter dois
+            formatos de data no mesmo banco seria pior que ter um limitado.
+
+    AnnotationRequest:
+      type: object
+      required: [target, body]
+      properties:
+        target: { type: string, maxLength: 200 }
+        body: { type: string, maxLength: 4000 }
+        author: { type: string, maxLength: 100, nullable: true }
+
+    ApiError:
+      type: object
+      required: [status, message]
+      properties:
+        status: { type: integer, format: int32 }
+        message:
+          type: string
+          description: Mensagem para o usuário, em português.
+
+    Overview:
+      type: object
+      required:
+        - dataflows
+        - versions
+        - executions
+        - executionsLast7Days
+        - transformations
+        - tasks
+        - queuePending
+        - transactionsProcessed
+        - queueTotalTimeMs
+        - transactionProcessingSeconds
+        - ingestionErrors
+        - lastIngestionError
+      properties:
+        dataflows: { type: integer, format: int64 }
+        versions: { type: integer, format: int64 }
+        executions: { type: integer, format: int64 }
+        executionsLast7Days:
+          type: integer
+          format: int64
+          description: |
+            Execuções com alguma task iniciada nos últimos sete dias, por
+            `performance.starttime` (horário de quem gravou, sem fuso).
+        transformations: { type: integer, format: int64 }
+        tasks: { type: integer, format: int64 }
+        queuePending:
+          type: integer
+          format: int32
+          description: Transações ainda na fila de ingestão.
+        transactionsProcessed:
+          type: integer
+          format: int32
+          description: Acumulado desde que o processo subiu.
+        queueTotalTimeMs:
+          type: number
+          format: double
+          description: Tempo acumulado em fila, em milissegundos.
+        transactionProcessingSeconds:
+          type: number
+          format: double
+          description: |
+            Soma do tempo de processamento de cada transação, em
+            segundos, acumulado desde que o processo subiu. Dividido por
+            `transactionsProcessed` dá o tempo médio por transação.
+        ingestionErrors:
+          type: integer
+          format: int32
+          description: |
+            Transações que falharam ao ser ingeridas desde que o processo subiu.
+            Existe porque a thread de ingestão passou a **sobreviver** a
+            exceções: antes, a primeira delas matava a ingestão em silêncio e
+            nenhuma task seguinte chegava ao banco (risco R5). Qualquer valor
+            acima de zero merece atenção.
+        lastIngestionError:
+          type: string
+          nullable: true
+          description: |
+            Sempre presente no corpo, podendo ser `null`. Tipo e mensagem da
+            última falha, para dar um ponto de partida sem precisar do log.
+
+    VersionSummary:
+      type: object
+      required: [version, executions, tasks, errorTasks, lastRun, origin, generator]
+      properties:
+        version: { type: integer, format: int32 }
+        executions: { type: integer, format: int32 }
+        tasks: { type: integer, format: int32 }
+        errorTasks: { type: integer, format: int32 }
+        lastRun:
+          type: string
+          nullable: true
+          description: "`performance.endtime` da última task desta versão; `null` se nenhuma rodou."
+        origin:
+          $ref: "#/components/schemas/MappingOrigin"
+        generator:
+          type: string
+          nullable: true
+          description: |
+            Quem gerou o mapeamento, como o cliente declarou ao salvar a
+            definição (ex.: nome e versão da ferramenta). `null` quando
+            não declarado.
+
+    ExecutionSummary:
+      type: object
+      required:
+        - id
+        - version
+        - tag
+        - tasks
+        - errorTasks
+        - runningTasks
+        - startTime
+        - endTime
+        - durationSeconds
+      properties:
+        id: { type: integer, format: int32 }
+        version: { type: integer, format: int32 }
+        tag: { type: string }
+        tasks: { type: integer, format: int32 }
+        errorTasks: { type: integer, format: int32 }
+        runningTasks: { type: integer, format: int32 }
+        startTime: { type: string, nullable: true }
+        endTime: { type: string, nullable: true }
+        durationSeconds:
+          type: number
+          format: double
+          nullable: true
+          description: "`null` quando a execução não tem nenhuma linha de `performance`."
+
+    TimelineRow:
+      type: object
+      required: [transformationTag, taskCount, errorTaskCount, startOffsetSeconds, durationSeconds]
+      properties:
+        transformationTag: { type: string }
+        taskCount: { type: integer, format: int32 }
+        errorTaskCount: { type: integer, format: int32 }
+        startOffsetSeconds:
+          type: number
+          format: double
+          description: Relativo ao início da própria execução, não ao relógio.
+        durationSeconds: { type: number, format: double }
+
+    TaskAnomaly:
+      type: object
+      required: [taskId, transformationTag, status, errorMessage]
+      properties:
+        taskId: { type: integer, format: int32 }
+        transformationTag: { type: string }
+        status: { type: string, enum: [RUNNING, FINISHED_WITH_ERROR] }
+        errorMessage: { type: string, nullable: true }
+
+    ExecutionTimeline:
+      type: object
+      required: [execution, rows, anomalies]
+      properties:
+        execution: { $ref: "#/components/schemas/ExecutionSummary" }
+        rows:
+          type: array
+          items: { $ref: "#/components/schemas/TimelineRow" }
+        anomalies:
+          type: array
+          items: { $ref: "#/components/schemas/TaskAnomaly" }
+
+    IngestionAlert:
+      type: object
+      required: [executionId, executionTag, errorTasks, runningTasks]
+      properties:
+        executionId: { type: integer, format: int32 }
+        executionTag: { type: string }
+        errorTasks: { type: integer, format: int32 }
+        runningTasks: { type: integer, format: int32 }
+
+    PendingTransaction:
+      type: object
+      required: [type, dataflowTag]
+      properties:
+        type:
+          type: string
+          description: "`DATAFLOW` ou `TASK`."
+        dataflowTag:
+          type: string
+          nullable: true
+          description: Sempre presente no corpo, podendo ser `null`.
+
+    IngestionHealth:
+      type: object
+      required: [tasks, errorTasks, runningTasks, alerts]
+      properties:
+        tasks: { type: integer, format: int32 }
+        errorTasks: { type: integer, format: int32 }
+        runningTasks: { type: integer, format: int32 }
+        alerts:
+          type: array
+          items: { $ref: "#/components/schemas/IngestionAlert" }
+
+    IngestionThroughput:
+      type: object
+      required: [hourlyTaskCounts, tasksPerMinute, changePercent]
+      properties:
+        hourlyTaskCounts:
+          type: array
+          items: { type: integer, format: int32 }
+          description: 24 valores, do mais antigo (23h atrás) ao mais recente (agora).
+        tasksPerMinute:
+          type: number
+          format: double
+          description: Tasks concluídas na última hora, dividido por 60.
+        changePercent:
+          type: number
+          format: double
+          nullable: true
+          description: |
+            Variação percentual da segunda metade da janela (últimas 12h) sobre
+            a primeira (12h anteriores). `null` quando a primeira metade não tem
+            nenhuma task — não há base de comparação.

@@ -75,8 +75,14 @@ public class DataflowProvenance {
                     depDtID = transformations.get(s.dependencyTransformation.tag);
                 }
 
-                int setID = storeSet(db, dfID, transformations.get(s.transformation.tag),
+                Integer setID = storeSet(db, dfID, transformations.get(s.transformation.tag),
                         depDtID, s, t.getDBMS());
+                if (setID == null) {
+                    // storeSet devolve null quando falha.
+                    throw new IllegalStateException("nao foi possivel gravar o conjunto '"
+                            + s.tag + "' da transformacao '" + s.transformation.tag
+                            + "': veja o erro de SQL acima");
+                }
                 sets.put(s.tag, setID);
 
                 if (setTags.indexOf(s.tag) == -1) {
@@ -175,6 +181,7 @@ public class DataflowProvenance {
             }
             if (rs.next()) {
                 df.version = rs.getInt(1);
+                storeVersionOrigin(db, df);
                 return df.version;
             }
         } catch (Exception ex) {
@@ -182,6 +189,24 @@ public class DataflowProvenance {
         }
 
         return null;
+    }
+
+    /** UPDATE separado para não mudar a assinatura de insertDataflowVersion, já instalada nos bancos existentes. */
+    private static void storeVersionOrigin(Connection db, Dataflow df) {
+        if (df.origin == null && df.generator == null) {
+            return;
+        }
+        try (PreparedStatement st = db.prepareStatement(
+                "UPDATE dataflow_version SET origin = ?, generator = ? WHERE version = ?")) {
+            st.setString(1, df.origin);
+            st.setString(2, df.generator == null ? null
+                    : df.generator.substring(0, Math.min(200, df.generator.length())));
+            st.setInt(3, df.version);
+            st.executeUpdate();
+        } catch (SQLException ex) {
+            Utils.print(0, "[Warning] origem do mapeamento nao gravada para a versao "
+                    + df.version + ": " + ex.getMessage());
+        }
     }
 
     private static Integer storeTransformation(Connection db, Integer dfID, Transformation dt, DBMS dbms) {
@@ -645,26 +670,6 @@ public class DataflowProvenance {
         }
         sb.append(";");
         return sb;
-    }
-
-    protected static Integer getTransformationID(Connection db, String dtTag, Integer identifier) {
-        try {
-            Statement st = db.createStatement();
-            StringBuilder sb = new StringBuilder();
-            sb.append("SELECT t.id ").append(Utils.NEW_LINE)
-                    .append("FROM task t, data_transformation dt ").append(Utils.NEW_LINE)
-                    .append("WHERE t.dt_id = dt.id AND dt.tag = '").append(dtTag).append("' AND ")
-                    .append("t.identifier = ").append(identifier);
-
-            ResultSet rs = st.executeQuery(sb.toString());
-            if (rs.next()) {
-                return rs.getInt(1);
-            }
-        } catch (Exception ex) {
-            ex.printStackTrace();
-        }
-
-        return null;
     }
 
     private static ResultSet insertDataflow(Connection db, String tag) throws SQLException {

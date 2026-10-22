@@ -1,0 +1,23 @@
+# version: "2"
+services:
+  dfanalyzer:
+    image: dfanalyzer
+    build: .
+    platform: linux/amd64
+    restart: "no"
+    network_mode: "bridge"
+    environment:
+      - DFA_URL=http://0.0.0.0:22000
+      # Os horários de performance são gravados sem fuso, no relógio do container.
+      - TZ=${TZ:-America/Sao_Paulo}
+    ports:
+      - 22000:22000
+      - 50000:50000
+    working_dir: "/opt/DfAnalyzer"
+    entrypoint: [ "sh", "start-dfanalyzer.sh" ]
+    volumes:
+      - monetdb_data:/var/monetdb5
+      - monetdb_data:/opt/DfAnalyzer/data
+
+volumes:
+  monetdb_data:

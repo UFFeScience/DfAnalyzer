@@ -13,6 +13,14 @@
         <start-class>rest.server.WebApplication</start-class>
         <thymeleaf-layout-dialect.version>2.2.2</thymeleaf-layout-dialect.version>
         <thymeleaf.version>3.0.6.RELEASE</thymeleaf.version>
+        <maven.compiler.source>1.8</maven.compiler.source>
+        <maven.compiler.target>1.8</maven.compiler.target>
+        <!-- DfA Studio front-end: the toolchain below is used only at build time. -->
+        <studio.dir>${project.basedir}/studio</studio.dir>
+        <node.version>v20.18.1</node.version>
+        <npm.version>10.8.2</npm.version>
+        <frontend-maven-plugin.version>1.15.1</frontend-maven-plugin.version>
+        <studio.skip>false</studio.skip>
     </properties>
 
     <parent>
@@ -110,17 +118,61 @@
                     </execution>
                 </executions>
             </plugin>
+            <!-- Builds the DfA Studio bundle into the jar; skip with -Dstudio.skip=true. -->
+            <plugin>
+                <groupId>com.github.eirslett</groupId>
+                <artifactId>frontend-maven-plugin</artifactId>
+                <version>${frontend-maven-plugin.version}</version>
+                <configuration>
+                    <workingDirectory>${studio.dir}</workingDirectory>
+                    <installDirectory>${project.build.directory}</installDirectory>
+                    <skip>${studio.skip}</skip>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>install-node-and-npm</id>
+                        <goals>
+                            <goal>install-node-and-npm</goal>
+                        </goals>
+                        <phase>prepare-package</phase>
+                        <configuration>
+                            <nodeVersion>${node.version}</nodeVersion>
+                            <npmVersion>${npm.version}</npmVersion>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>npm-install</id>
+                        <goals>
+                            <goal>npm</goal>
+                        </goals>
+                        <phase>prepare-package</phase>
+                        <configuration>
+                            <arguments>install --no-audit --no-fund</arguments>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>npm-build</id>
+                        <goals>
+                            <goal>npm</goal>
+                        </goals>
+                        <phase>prepare-package</phase>
+                        <configuration>
+                            <arguments>run build</arguments>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
 
     <repositories>
         <repository>
             <id>central</id>
-            <url>http://repo1.maven.org/maven2/</url>
+            <url>https://repo1.maven.org/maven2/</url>
         </repository>
         <repository>
             <id>clojars.org</id>
-            <url>http://clojars.org/repo</url>
+            <url>https://clojars.org/repo</url>
         </repository>
     </repositories>
     <name>DfAnalyzer</name>

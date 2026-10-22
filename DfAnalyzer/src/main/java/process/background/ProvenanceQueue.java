@@ -5,6 +5,7 @@ import java.text.DecimalFormat;
 import java.util.ArrayList;
 import di.object.process.Transaction;
 import di.object.dataflow.Dataflow;
+import di.provenance.DataflowLoader;
 import java.io.IOException;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.logging.Level;
@@ -28,9 +29,13 @@ public class ProvenanceQueue extends Thread {
     public double queueTotalTime;
     public int transactionsProcessed;
 
+    /** Falhas de ingestão desde que o processo subiu. */
+    public volatile int ingestionErrors;
+    public volatile String lastIngestionError;
+
     public void removeDataflow(String dfTag) {
         for (Dataflow df : dataflowsInMemory) { //TODO: change to a Map with df_tag as keys (to insert and remove instances more efficiently)
-            if (df.dataflowTag.equals(dfTag)) {
+            if (matches(df, dfTag)) {
                 dataflowsInMemory.remove(df);
                 break;
             }
@@ -39,11 +44,28 @@ public class ProvenanceQueue extends Thread {
 
     public Dataflow getDataflow(String dfTag) {
         for (Dataflow df : dataflowsInMemory) { //TODO: change to a Map with df_tag as keys (to insert and remove instances more efficiently)
-            if (df.dataflowTag.equals(dfTag)) {
+            if (matches(df, dfTag)) {
                 return df;
             }
         }
         return null;
+    }
+
+    /** Devolve o dataflow do cache ou o reconstrói do banco. */
+    private Dataflow resolveDataflow(String dfTag) {
+        Dataflow cached = getDataflow(dfTag);
+        if (cached != null) {
+            return cached;
+        }
+        Dataflow loaded = DataflowLoader.load(db.getConnection(), dfTag);
+        if (loaded != null) {
+            dataflowsInMemory.add(loaded);
+        }
+        return loaded;
+    }
+
+    private static boolean matches(Dataflow df, String dfTag) {
+        return df != null && df.dataflowTag != null && df.dataflowTag.equals(dfTag);
     }
 
     public enum DBOperation {
@@ -58,13 +80,31 @@ public class ProvenanceQueue extends Thread {
         this.transactionsProcessed = 0;
     }
 
+    private static final long IDLE_SLEEP_MS = 50;
+
     @Override
     public void run() {
         while (true) {
-//            System.out.println("+++++++++++++++++++++++++++++");
-//            System.out.println("start queue");
-            runQueries();
-//            System.out.println("end queue");
+            int processed = 0;
+            try {
+                processed = runQueries();
+            } catch (Exception ex) {
+                // Se a thread morrer, todas as transações seguintes se perdem.
+                ingestionErrors++;
+                lastIngestionError = ex.getClass().getSimpleName()
+                        + (ex.getMessage() == null ? "" : ": " + ex.getMessage());
+                Logger.getLogger(ProvenanceQueue.class.getName())
+                        .log(Level.SEVERE, "falha ao ingerir transacao", ex);
+            }
+
+            if (processed == 0) {
+                try {
+                    Thread.sleep(IDLE_SLEEP_MS);
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
         }
     }
 
@@ -82,15 +122,16 @@ public class ProvenanceQueue extends Thread {
     }
 
     @SuppressWarnings("CallToThreadDumpStack")
-    private void runQueries() {
+    private int runQueries() {
         if (db == null) {
-            return;
+            return 0;
         }
         ArrayList<Transaction> transactions = handleTransaction(DBOperation.RUN_TRANSACTION, null);
         for (Transaction t : transactions) {
             startTime = System.currentTimeMillis();
             if ((t.getType() == TransactionType.TASK) && (t.getPath() == null)) {
-                Provenance.performTransaction(db.getConnection(), t, getDataflow(t.getDataflowTag()));
+                Provenance.performTransaction(db.getConnection(), t,
+                        resolveDataflow(t.getDataflowTag()));
             } else if (t.getType() == TransactionType.SHUTDOWN) {
                 System.out.println("Shutting down...");
                 try {
@@ -114,11 +155,14 @@ public class ProvenanceQueue extends Thread {
             t.execEndTime = endTime;
             queueTotalTime = queueTotalTime + (t.queueEndTime - t.queueStartTime);
 
+            // Transação de TASK não carrega o objeto Dataflow.
             Dataflow dataflow = t.getDataflowFromObjects();
-            if (!dataflowsInMemory.contains(dataflow)) {
+            if (dataflow != null && dataflow.dataflowTag != null
+                    && getDataflow(dataflow.dataflowTag) == null) {
                 dataflowsInMemory.add(dataflow);
             }
         }
+        return transactions.size();
     }
 
 }
